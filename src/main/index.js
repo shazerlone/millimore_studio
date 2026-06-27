@@ -175,6 +175,27 @@ ipcMain.handle('app:restart', () => {
   app.exit(0)
 })
 
+// macOS App Translocation: when run from the DMG/Downloads, macOS executes the
+// app from a randomized read-only path and permissions never stick. Detect that
+// and offer to move the app into /Applications (which fixes it permanently).
+ipcMain.handle('app:isInApplicationsFolder', () => {
+  if (process.platform !== 'darwin' || !app.isPackaged) return true
+  try {
+    return app.isInApplicationsFolder()
+  } catch {
+    return true
+  }
+})
+ipcMain.handle('app:moveToApplications', () => {
+  if (process.platform !== 'darwin' || !app.isPackaged) return { ok: true, moved: false }
+  try {
+    const moved = app.moveToApplicationsFolder() // relaunches on success
+    return { ok: true, moved }
+  } catch (err) {
+    return { ok: false, error: err.message }
+  }
+})
+
 // ---- IPC: stream -------------------------------------------------------
 
 ipcMain.handle('stream:start', (_e, config) => {

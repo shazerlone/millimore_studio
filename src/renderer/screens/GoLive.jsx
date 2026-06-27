@@ -30,7 +30,6 @@ export function GoLive() {
   const [hasCamera, setHasCamera] = useState(false)
   const [hasScreen, setHasScreen] = useState(false)
   const [screenSource, setScreenSource] = useState(null)
-  const [perms, setPerms] = useState(null)
   const [captureError, setCaptureError] = useState(null)
 
   // devices
@@ -72,10 +71,6 @@ export function GoLive() {
     let cancelled = false
     async function initCamera() {
       try {
-        if (bridge?.capture?.permissions) {
-          const p = await bridge.capture.permissions()
-          if (!cancelled) setPerms(p)
-        }
         await acquireCamera()
         // Enumerate devices (labels appear only after permission is granted).
         const list = await navigator.mediaDevices.enumerateDevices()
@@ -300,7 +295,6 @@ export function GoLive() {
   }
 
   const activeCount = DESTS.filter((d) => enabled[d.platform]).length
-  const screenDenied = perms && perms.screen && perms.screen !== 'granted'
 
   return (
     <Page maxWidth={1320}>
@@ -384,7 +378,7 @@ export function GoLive() {
               </label>
             </div>
 
-            {(captureError || screenDenied) && (
+            {captureError && (
               <div
                 style={{
                   marginTop: 12,
@@ -400,12 +394,22 @@ export function GoLive() {
               >
                 <InfoIcon size={16} style={{ flexShrink: 0, marginTop: 1 }} />
                 <div style={{ flex: 1 }}>
-                  {captureError === 'camera' && <div>Camera access was blocked.</div>}
+                  {captureError === 'camera' && <div style={{ marginBottom: 6 }}>Camera access was blocked.</div>}
                   <div>
-                    <strong>Screen Recording needs an app restart.</strong> macOS doesn’t apply this
-                    permission until Millimore is relaunched — even if it already shows as enabled in
-                    System Settings.
+                    <strong>Couldn’t capture your screen.</strong> On macOS this almost always means
+                    one of two things:
                   </div>
+                  <ol style={{ margin: '8px 0 0', paddingLeft: 18 }}>
+                    <li>
+                      <strong>Millimore must be in your Applications folder</strong> — if you’re
+                      running it from the disk image or Downloads, macOS won’t keep the permission.
+                      Drag the app to Applications and open it from there.
+                    </li>
+                    <li>
+                      Enable <strong>Screen Recording</strong> for Millimore in System Settings, then
+                      <strong> restart the app</strong> (macOS only applies it after a relaunch).
+                    </li>
+                  </ol>
                   <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
                     {bridge?.restart && (
                       <Button size="sm" onClick={() => bridge.restart()}>

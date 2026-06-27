@@ -24,6 +24,7 @@ function Shell() {
 
 function RequireAuth() {
   const { authed } = useApp()
+  if (authed === null) return null // still loading the persisted session
   return authed ? <Outlet /> : <Navigate to="/login" replace />
 }
 

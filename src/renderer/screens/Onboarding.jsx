@@ -15,6 +15,7 @@ export function Onboarding() {
   const [status, setStatus] = useState({ camera: 'unknown', microphone: 'unknown', screen: 'unknown' })
   const [busy, setBusy] = useState(null)
   const [needsRestart, setNeedsRestart] = useState(false)
+  const [inApps, setInApps] = useState(true)
 
   const refresh = async () => {
     if (!bridge?.capture?.permissions) {
@@ -27,6 +28,7 @@ export function Onboarding() {
 
   useEffect(() => {
     refresh()
+    bridge?.app?.isInApplicationsFolder?.().then((v) => setInApps(v !== false))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -96,6 +98,39 @@ export function Onboarding() {
             below — it only takes a moment.
           </p>
         </div>
+
+        {!inApps && (
+          <div
+            style={{
+              marginBottom: 14,
+              padding: 16,
+              borderRadius: radius.card,
+              border: `1px solid ${colors.primary}`,
+              background: colors.primarySoft,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 14
+            }}
+          >
+            <div style={{ flex: 1 }}>
+              <div style={{ ...typography.h3, color: colors.textPrimary }}>
+                Move Millimore to Applications first
+              </div>
+              <div style={{ ...typography.small, color: colors.textSecondary, marginTop: 2 }}>
+                You’re running it from the disk image / Downloads. macOS won’t remember camera or
+                screen permissions until the app lives in your Applications folder.
+              </div>
+            </div>
+            <Button
+              onClick={async () => {
+                const r = await bridge?.app?.moveToApplications?.()
+                if (r && r.ok === false) setInApps(true) // let them continue if move failed
+              }}
+            >
+              Move &amp; relaunch
+            </Button>
+          </div>
+        )}
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           <PermissionRow

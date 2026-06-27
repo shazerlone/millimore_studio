@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { colors, radius } from '@theme/colors'
 import { typography } from '@theme/typography'
 import { Page, PageHeader } from '@components/Page'
@@ -17,7 +18,8 @@ const SECTIONS = [
 ]
 
 export function Settings() {
-  const { bridge } = useApp()
+  const { bridge, signOut } = useApp()
+  const navigate = useNavigate()
   const [active, setActive] = useState('profile')
   const [devices, setDevices] = useState({ mics: [], cams: [] })
   const [version, setVersion] = useState('1.0.0')
@@ -70,7 +72,16 @@ export function Settings() {
           {active === 'notifications' && <NotifSection notif={notif} setNotif={setNotif} />}
           {active === 'audio' && <AudioSection mics={devices.mics} micVol={micVol} setMicVol={setMicVol} />}
           {active === 'camera' && <CameraSection cams={devices.cams} />}
-          {active === 'about' && <AboutSection version={version} bridge={bridge} />}
+          {active === 'about' && (
+            <AboutSection
+              version={version}
+              bridge={bridge}
+              onSignOut={() => {
+                signOut()
+                navigate('/login')
+              }}
+            />
+          )}
         </Card>
       </div>
     </Page>
@@ -221,7 +232,7 @@ function CameraSection({ cams }) {
   )
 }
 
-function AboutSection({ version, bridge }) {
+function AboutSection({ version, bridge, onSignOut }) {
   const [checking, setChecking] = useState(false)
   const [status, setStatus] = useState(null)
   const check = async () => {
@@ -250,6 +261,16 @@ function AboutSection({ version, bridge }) {
         </Button>
         {status === 'up-to-date' && <Badge tone="green"><CheckIcon size={12} /> Up to date</Badge>}
         {status === 'update-available' && <Badge tone="blue">Update available</Badge>}
+      </div>
+
+      <div style={{ borderTop: `1px solid ${colors.border}`, margin: '22px 0 0', paddingTop: 20 }}>
+        <div style={{ ...typography.bodyStrong, color: colors.textPrimary, marginBottom: 2 }}>Account</div>
+        <div style={{ ...typography.small, color: colors.textSecondary, marginBottom: 12 }}>
+          You’ll stay signed in on this device until you sign out.
+        </div>
+        <Button variant="secondary" onClick={onSignOut}>
+          Sign out
+        </Button>
       </div>
     </div>
   )

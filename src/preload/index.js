@@ -58,7 +58,9 @@ const api = {
   // ---- App info ----
   app: {
     getVersion: () => ipcRenderer.invoke('app:getVersion'),
-    checkForUpdates: () => ipcRenderer.invoke('app:checkForUpdates')
+    checkForUpdates: () => ipcRenderer.invoke('app:checkForUpdates'),
+    isInApplicationsFolder: () => ipcRenderer.invoke('app:isInApplicationsFolder'),
+    moveToApplications: () => ipcRenderer.invoke('app:moveToApplications')
   }
 }
 

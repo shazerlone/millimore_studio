@@ -28,7 +28,7 @@ const DEFAULT_OVERLAY = {
 }
 
 export function AppProvider({ children }) {
-  const [authed, setAuthed] = useState(false)
+  const [authed, setAuthedState] = useState(null) // null = loading from disk
   const [isLive, setIsLive] = useState(false)
   const [mt5Connected, setMt5Connected] = useState(false)
   const [overlayConfig, setOverlayConfig] = useState(DEFAULT_OVERLAY)
@@ -37,19 +37,32 @@ export function AppProvider({ children }) {
   const [onboarded, setOnboarded] = useState(null) // null = unknown (loading)
   const [toasts, setToasts] = useState([])
 
-  // Hydrate saved config + onboarding flag from disk on launch.
+  // Hydrate saved session + config from disk on launch.
   useEffect(() => {
     if (!bridge) {
+      setAuthedState(false)
       setOnboarded(true) // browser/dev: skip the wizard
       return
     }
     bridge.settings.get('overlayConfig').then((saved) => {
       if (saved) setOverlayConfig((c) => ({ ...c, ...saved }))
     })
+    bridge.settings.get('authed').then((v) => setAuthedState(!!v))
     bridge.settings.get('onboarded').then((v) => setOnboarded(!!v))
     const off = bridge.stream.onStats(setStreamStats)
     return off
   }, [])
+
+  // Persist the session so the user stays logged in until they sign out.
+  const setAuthed = (v) => {
+    setAuthedState(v)
+    bridge?.settings.set('authed', !!v)
+  }
+
+  const signOut = () => {
+    setAuthed(false)
+    bridge?.settings.set('authed', false)
+  }
 
   const completeOnboarding = () => {
     setOnboarded(true)
@@ -84,6 +97,7 @@ export function AppProvider({ children }) {
       bridge,
       authed,
       setAuthed,
+      signOut,
       isLive,
       setIsLive,
       mt5Connected,
