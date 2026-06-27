@@ -196,14 +196,9 @@ function drawTradeCard(ctx, W, H, u, layout, cfg, trade) {
   ctx.fill()
   ctx.shadowColor = 'transparent'
 
-  // left edge accent
-  ctx.fillStyle = dir
-  roundRect(ctx, x, y, 5 * u, h, 2 * u)
-  ctx.fill()
-
-  // brand header
-  ctx.fillStyle = dark ? 'rgba(255,255,255,0.03)' : '#F8FAFC'
-  ctx.fillRect(x + 5 * u, y, w - 5 * u, headerH)
+  // brand header (no edge bar — clean, full width)
+  ctx.fillStyle = dark ? 'rgba(255,255,255,0.02)' : '#FBFCFE'
+  ctx.fillRect(x, y, w, headerH)
   ctx.fillStyle = line
   ctx.fillRect(x, y + headerH, w, 1 * u)
   drawStar(ctx, x + padX, y + headerH / 2, 8 * u, BLUE)
@@ -212,10 +207,16 @@ function drawTradeCard(ctx, W, H, u, layout, cfg, trade) {
   ctx.textBaseline = 'middle'
   ctx.font = `800 ${17 * u}px Inter, sans-serif`
   ctx.fillText('millimore', x + padX + 16 * u, y + headerH / 2 + 1 * u)
-  ctx.fillStyle = sub
+  // Live / Closed status dot + label
+  const statusCol = trade.event === 'close' ? SELL : '#16A34A'
+  const statusLabel = trade.event === 'close' ? 'CLOSED' : 'LIVE'
   ctx.font = `800 ${11 * u}px Inter, sans-serif`
   ctx.textAlign = 'right'
-  ctx.fillText('LIVE TRADE', x + w - padX, y + headerH / 2 + 1 * u)
+  ctx.fillStyle = statusCol
+  ctx.fillText(statusLabel, x + w - padX, y + headerH / 2 + 1 * u)
+  ctx.beginPath()
+  ctx.arc(x + w - padX - ctx.measureText(statusLabel).width - 8 * u, y + headerH / 2, 3 * u, 0, Math.PI * 2)
+  ctx.fill()
 
   let cy = y + headerH + 22 * u
   ctx.textAlign = 'left'
@@ -231,16 +232,19 @@ function drawTradeCard(ctx, W, H, u, layout, cfg, trade) {
   if (fields.direction !== false) {
     const chipLabel = trade.direction
     ctx.font = `800 ${15 * u}px Inter, sans-serif`
-    const cw = ctx.measureText(chipLabel).width + 34 * u
-    const ch = 28 * u
-    ctx.fillStyle = isBuy ? 'rgba(22,163,74,0.16)' : 'rgba(239,68,68,0.16)'
-    roundRect(ctx, cx, cy - ch / 2 - 4 * u, cw, ch, ch / 2)
+    const cw = ctx.measureText(chipLabel).width + 38 * u
+    const ch = 30 * u
+    const cyTop = cy - ch / 2 - 4 * u
+    // solid chip in the direction color — instant buy/sell read
+    ctx.fillStyle = dir
+    roundRect(ctx, cx, cyTop, cw, ch, ch / 2)
     ctx.fill()
-    // arrow
-    ctx.strokeStyle = dir
+    // white arrow glyph
+    ctx.strokeStyle = '#fff'
     ctx.lineWidth = 2.4 * u
     ctx.lineCap = 'round'
-    const ax = cx + 12 * u
+    ctx.lineJoin = 'round'
+    const ax = cx + 14 * u
     const ay = cy - 4 * u
     ctx.beginPath()
     if (isBuy) {
@@ -257,9 +261,9 @@ function drawTradeCard(ctx, W, H, u, layout, cfg, trade) {
       ctx.lineTo(ax + 4 * u, ay - 1 * u)
     }
     ctx.stroke()
-    ctx.fillStyle = dir
+    ctx.fillStyle = '#fff'
     ctx.font = `800 ${15 * u}px Inter, sans-serif`
-    ctx.fillText(chipLabel, cx + 24 * u, cy - 4 * u + 1 * u)
+    ctx.fillText(chipLabel, cx + 26 * u, cy - 4 * u + 1 * u)
   }
   cy += minimal ? 24 * u : 18 * u
 

@@ -198,6 +198,14 @@ export function GoLive() {
     }
   }
 
+  const stopSharing = () => {
+    screenStream.current?.getTracks().forEach((t) => t.stop())
+    screenStream.current = null
+    if (screenRef.current) screenRef.current.srcObject = null
+    setScreenSource(null)
+    setHasScreen(false)
+  }
+
   const runSpeedTest = async () => {
     setTesting(true)
     const res = bridge ? await bridge.stream.testSpeed() : { mbps: 18.2, recommended: '1080p60' }
@@ -362,9 +370,20 @@ export function GoLive() {
                 {hasScreen ? 'Change screen' : 'Select screen to share'}
               </Button>
               {hasScreen && (
-                <Badge tone="green">
-                  <CheckIcon size={12} /> {screenSource?.name?.slice(0, 28) || 'Screen'}
-                </Badge>
+                <>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={stopSharing}
+                    disabled={isLive}
+                    style={{ color: colors.live }}
+                  >
+                    Stop sharing
+                  </Button>
+                  <Badge tone="green">
+                    <CheckIcon size={12} /> {screenSource?.name?.slice(0, 24) || 'Screen'}
+                  </Badge>
+                </>
               )}
               <Badge tone={hasCamera ? 'green' : 'amber'}>
                 <VideoIcon size={12} /> {hasCamera ? 'Camera on' : 'Camera off'}
