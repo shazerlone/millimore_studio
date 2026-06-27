@@ -1,13 +1,17 @@
 name: Build Millimore Desktop
 
-# Builds the app on GitHub's runners (so you don't need a local toolchain) and
-# uploads downloadable installers. macOS is built for BOTH Apple Silicon (arm64)
-# and Intel (x64) so the app runs on every Mac — download the one for your chip.
+# Builds the app on GitHub's runners (so you don't need a local toolchain),
+# uploads installers as artifacts, AND publishes them to a Releases page with
+# permanent, direct download links. macOS is built for BOTH Apple Silicon
+# (arm64) and Intel (x64) so the app runs on every Mac.
 on:
   push:
     branches:
       - claude/millimore-desktop-design-474kzm
   workflow_dispatch: {} # lets you run it manually from the Actions tab
+
+permissions:
+  contents: write # required to publish a GitHub Release
 
 jobs:
   # Fast feedback: lint + compile the bundles on Linux.
@@ -47,8 +51,6 @@ jobs:
       - name: Install dependencies
         run: npm ci
       - name: Fetch FFmpeg binary for ${{ matrix.arch }}
-        # ffmpeg-static only downloads the host arch on install; re-fetch the
-        # correct one for the target so the packaged app's FFmpeg matches.
         run: npm rebuild ffmpeg-static
         env:
           npm_config_arch: ${{ matrix.arch }}
@@ -58,7 +60,7 @@ jobs:
         run: npx electron-builder --mac --${{ matrix.arch }} --publish never
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: false # unsigned — no Apple cert needed
-      - name: Upload installers
+      - name: Upload installers (artifact)
         uses: actions/upload-artifact@v4
         with:
           name: millimore-desktop-mac-${{ matrix.arch }}
@@ -87,10 +89,42 @@ jobs:
         run: npx electron-builder --win --x64 --publish never
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: false
-      - name: Upload installers
+      - name: Upload installers (artifact)
         uses: actions/upload-artifact@v4
         with:
           name: millimore-desktop-windows
           path: release/*.exe
           if-no-files-found: warn
           retention-days: 14
+
+  # Publish every installer to a single rolling GitHub Release with permanent,
+  # direct download links — much easier to find than Actions artifacts.
+  release:
+    name: Publish Release
+    needs: [package-mac, package-win]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all installers
+        uses: actions/download-artifact@v4
+        with:
+          path: installers
+      - name: Publish to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: desktop-latest
+          name: Millimore Desktop — latest build
+          body: |
+            Latest Millimore Desktop installers, built automatically from the
+            `claude/millimore-desktop-design-474kzm` branch.
+
+            | Your machine | Download |
+            | --- | --- |
+            | 🍎 Mac — Intel | `*-mac-x64*` (`.dmg`) |
+            | 🍎 Mac — Apple Silicon (M1–M4) | `*-mac-arm64*` (`.dmg`) |
+            | 🪟 Windows | `*-windows*` (`.exe`) |
+
+            The app is **unsigned**. On macOS, right-click the app → Open → Open,
+            or run `xattr -dr com.apple.quarantine "/Applications/Millimore Desktop.app"`.
+            On Windows, click "More info → Run anyway".
+          files: installers/**/*
+          make_latest: true
