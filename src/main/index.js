@@ -135,6 +135,32 @@ ipcMain.handle('capture:getSources', async () => {
 
 // Current camera/mic/screen permission status, and a way to (re)request it.
 ipcMain.handle('capture:permissions', () => ensureMacMediaAccess())
+
+// Camera/mic prompts (macOS shows the system dialog on first request).
+ipcMain.handle('capture:requestCamera', async () => {
+  if (process.platform !== 'darwin') return 'granted'
+  const ok = await systemPreferences.askForMediaAccess('camera').catch(() => false)
+  return ok ? 'granted' : systemPreferences.getMediaAccessStatus('camera')
+})
+ipcMain.handle('capture:requestMic', async () => {
+  if (process.platform !== 'darwin') return 'granted'
+  const ok = await systemPreferences.askForMediaAccess('microphone').catch(() => false)
+  return ok ? 'granted' : systemPreferences.getMediaAccessStatus('microphone')
+})
+
+// Screen Recording has no askForMediaAccess(); the OS prompt appears the first
+// time we enumerate sources. After the user grants it, macOS requires an app
+// restart before getMediaAccessStatus('screen') flips to 'granted' and before
+// desktopCapturer can actually read pixels — hence the restart flow.
+ipcMain.handle('capture:triggerScreenPrompt', async () => {
+  try {
+    await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: 1, height: 1 } })
+  } catch {
+    /* the call itself triggers the prompt; errors are expected pre-grant */
+  }
+  return process.platform === 'darwin' ? systemPreferences.getMediaAccessStatus('screen') : 'granted'
+})
+
 ipcMain.handle('capture:openScreenPrefs', () => {
   if (process.platform === 'darwin') {
     shell.openExternal(
@@ -142,6 +168,11 @@ ipcMain.handle('capture:openScreenPrefs', () => {
     )
   }
   return { ok: true }
+})
+
+ipcMain.handle('app:restart', () => {
+  app.relaunch()
+  app.exit(0)
 })
 
 // ---- IPC: stream -------------------------------------------------------

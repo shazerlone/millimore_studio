@@ -11,9 +11,13 @@ const api = {
   capture: {
     getSources: () => ipcRenderer.invoke('capture:getSources'),
     permissions: () => ipcRenderer.invoke('capture:permissions'),
+    requestCamera: () => ipcRenderer.invoke('capture:requestCamera'),
+    requestMic: () => ipcRenderer.invoke('capture:requestMic'),
+    triggerScreenPrompt: () => ipcRenderer.invoke('capture:triggerScreenPrompt'),
     openScreenPrefs: () => ipcRenderer.invoke('capture:openScreenPrefs')
   },
   openExternal: (url) => ipcRenderer.invoke('app:openExternal', url),
+  restart: () => ipcRenderer.invoke('app:restart'),
 
   // ---- Multistream engine (FFmpeg) ----
   stream: {

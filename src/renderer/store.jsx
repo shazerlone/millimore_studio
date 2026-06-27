@@ -34,16 +34,36 @@ export function AppProvider({ children }) {
   const [overlayConfig, setOverlayConfig] = useState(DEFAULT_OVERLAY)
   const [overlayEnabled, setOverlayEnabled] = useState(true)
   const [streamStats, setStreamStats] = useState(null)
+  const [onboarded, setOnboarded] = useState(null) // null = unknown (loading)
+  const [toasts, setToasts] = useState([])
 
-  // Hydrate the saved overlay config from disk on launch.
+  // Hydrate saved config + onboarding flag from disk on launch.
   useEffect(() => {
-    if (!bridge) return
+    if (!bridge) {
+      setOnboarded(true) // browser/dev: skip the wizard
+      return
+    }
     bridge.settings.get('overlayConfig').then((saved) => {
       if (saved) setOverlayConfig((c) => ({ ...c, ...saved }))
     })
+    bridge.settings.get('onboarded').then((v) => setOnboarded(!!v))
     const off = bridge.stream.onStats(setStreamStats)
     return off
   }, [])
+
+  const completeOnboarding = () => {
+    setOnboarded(true)
+    bridge?.settings.set('onboarded', true)
+  }
+
+  const pushToast = (message, tone = 'info', ttl = 4500) => {
+    const id = `t${Date.now()}${Math.random()}`
+    setToasts((list) => [...list, { id, message, tone }])
+    setTimeout(() => setToasts((list) => list.filter((t) => t.id !== id)), ttl)
+    return id
+  }
+
+  const dismissToast = (id) => setToasts((list) => list.filter((t) => t.id !== id))
 
   const updateOverlay = (patch) => {
     setOverlayConfig((c) => {
@@ -72,9 +92,14 @@ export function AppProvider({ children }) {
       updateOverlay,
       overlayEnabled,
       setOverlayEnabled,
-      streamStats
+      streamStats,
+      onboarded,
+      completeOnboarding,
+      toasts,
+      pushToast,
+      dismissToast
     }),
-    [authed, isLive, mt5Connected, overlayConfig, overlayEnabled, streamStats]
+    [authed, isLive, mt5Connected, overlayConfig, overlayEnabled, streamStats, onboarded, toasts]
   )
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>

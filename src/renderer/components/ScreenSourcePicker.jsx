@@ -82,12 +82,42 @@ export function ScreenSourcePicker({ onPick, onClose }) {
           {sources && (
             <>
               <Section title="Entire screen" items={screens} onPick={onPick} />
-              {windows.length > 0 && (
-                <Section title="App windows" items={windows} onPick={onPick} />
-              )}
+              {windows.length > 0 && <Section title="App windows" items={windows} onPick={onPick} />}
+              {windows.length === 0 && <NoWindowsHint />}
             </>
           )}
         </div>
+      </div>
+    </div>
+  )
+}
+
+function NoWindowsHint() {
+  const bridge = window.millimore
+  return (
+    <div
+      style={{
+        padding: 14,
+        borderRadius: radius.card,
+        background: colors.warningSoft,
+        color: colors.warning,
+        ...typography.small
+      }}
+    >
+      <strong>Not seeing your other apps (Chrome, MT5, etc.)?</strong> macOS only lists other
+      windows once Screen Recording is granted <em>and</em> the app has been restarted. Capturing
+      “Entire screen” above always works.
+      <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+        {bridge?.restart && (
+          <Button size="sm" onClick={() => bridge.restart()}>
+            Restart app
+          </Button>
+        )}
+        {bridge?.capture?.openScreenPrefs && (
+          <Button variant="secondary" size="sm" onClick={() => bridge.capture.openScreenPrefs()}>
+            Open settings
+          </Button>
+        )}
       </div>
     </div>
   )

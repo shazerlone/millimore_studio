@@ -14,7 +14,7 @@ import { AudioStreamer } from '../lib/audioCapture'
 import { useApp } from '../store'
 
 export function GoLive() {
-  const { bridge, isLive, setIsLive, overlayConfig, overlayEnabled, setOverlayEnabled, streamStats } = useApp()
+  const { bridge, isLive, setIsLive, overlayConfig, overlayEnabled, setOverlayEnabled, streamStats, pushToast } = useApp()
 
   const [title, setTitle] = useState('London Open — Gold Scalping')
   const [quality, setQuality] = useState('1080p30')
@@ -139,10 +139,11 @@ export function GoLive() {
     if (!bridge) return
     return bridge.stream.onStatus((s) => {
       setHealth(s)
-      if (s.state === 'unstable' && s.recommend) {
-        setQuality(s.recommend)
-      }
+      if (s.state === 'unstable' && s.recommend) setQuality(s.recommend)
+      if (s.state === 'failed') pushToast(s.message || 'Stream dropped and could not reconnect.', 'error', 8000)
+      if (s.state === 'error') pushToast(s.message || 'Streaming error.', 'error', 8000)
     })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bridge])
 
   // Subscribe to live trade events to drive the overlay preview.
@@ -205,6 +206,18 @@ export function GoLive() {
   }
 
   const goLive = async () => {
+    // Validate keys for enabled non-Millimore destinations.
+    const missing = DESTS.filter(
+      (d) => !d.always && enabled[d.platform] && !(keys[d.platform] || '').trim()
+    )
+    if (missing.length) {
+      pushToast(
+        `Add a stream key for ${missing.map((m) => m.label).join(', ')}, or turn it off.`,
+        'warning'
+      )
+      return
+    }
+
     setStarting(true)
     const dests = DESTS.filter((d) => enabled[d.platform]).map((d) => ({
       platform: d.platform,
@@ -213,6 +226,21 @@ export function GoLive() {
     const micOn = !!cameraStream.current?.getAudioTracks?.().length
     try {
       if (bridge) {
+        // Composite the chosen screen + camera FIRST so a screen-permission
+        // failure surfaces before we open RTMP connections.
+        let sourceId = screenSource?.id
+        if (!sourceId) {
+          const sources = await bridge.capture.getSources()
+          sourceId = sources[0]?.id
+        }
+        if (!sourceId) throw new Error('NO_SCREEN')
+
+        compositor.current = new StreamCompositor({
+          quality,
+          getOverlay: () => ({ config: overlayConfigRef.current, trade: overlayTradeRef.current })
+        })
+        await compositor.current.start(sourceId, cameraStream.current)
+
         await bridge.stream.start({
           quality,
           destinations: dests,
@@ -220,20 +248,7 @@ export function GoLive() {
           audio: micOn,
           overlayRelayKey: keys.millimore || 'demo'
         })
-        // Composite the chosen screen + camera and feed FFmpeg.
-        let sourceId = screenSource?.id
-        if (!sourceId) {
-          const sources = await bridge.capture.getSources()
-          sourceId = sources[0]?.id
-        }
-        if (sourceId) {
-          compositor.current = new StreamCompositor({
-            quality,
-            getOverlay: () => ({ config: overlayConfigRef.current, trade: overlayTradeRef.current })
-          })
-          await compositor.current.start(sourceId, cameraStream.current)
-        }
-        // Pipe microphone audio into the encode.
+
         if (micOn) {
           audioStreamer.current = new AudioStreamer()
           audioStreamer.current.start(cameraStream.current)
@@ -241,10 +256,31 @@ export function GoLive() {
       }
       setIsLive(true)
       startTimer()
+      setCaptureError(null)
+      pushToast(
+        `You're live${dests.length ? ` to ${dests.length} destination${dests.length > 1 ? 's' : ''}` : ''}!`,
+        'success'
+      )
       if (overlayEnabled) setTimeout(() => setOverlayTrade(sampleTrade), 2500)
     } catch (err) {
       console.error('Failed to go live:', err)
-      setCaptureError('stream')
+      // Roll back any partial start.
+      compositor.current?.stop()
+      compositor.current = null
+      await bridge?.stream.stop().catch(() => {})
+
+      const raw = err?.message || ''
+      let msg
+      if (raw === 'NO_SCREEN' || /denied|permission|NotAllowed|getUserMedia|NotReadable/i.test(raw)) {
+        setCaptureError('screen')
+        msg =
+          'Couldn’t capture your screen. Enable Screen Recording for Millimore in System Settings → Privacy & Security, then restart the app.'
+      } else if (/destination/i.test(raw)) {
+        msg = 'No stream destinations. Add at least one stream key.'
+      } else {
+        msg = raw || 'Couldn’t go live. Please try again.'
+      }
+      pushToast(msg, 'error', 9000)
     } finally {
       setStarting(false)
     }
@@ -355,26 +391,33 @@ export function GoLive() {
                   ...typography.small,
                   color: colors.warning,
                   background: colors.warningSoft,
-                  padding: '10px 12px',
+                  padding: '12px',
                   borderRadius: radius.button,
                   display: 'flex',
                   gap: 8,
                   alignItems: 'flex-start'
                 }}
               >
-                <InfoIcon size={15} />
-                <div>
-                  {captureError === 'camera' && 'Camera access was blocked. '}
-                  {(captureError === 'screen' || screenDenied) && 'Screen Recording permission is needed. '}
-                  On macOS, allow it in System Settings → Privacy & Security, then reopen the app.
-                  {bridge?.capture?.openScreenPrefs && (
-                    <button
-                      onClick={() => bridge.capture.openScreenPrefs()}
-                      style={{ marginLeft: 6, color: colors.primary, fontWeight: 600 }}
-                    >
-                      Open settings
-                    </button>
-                  )}
+                <InfoIcon size={16} style={{ flexShrink: 0, marginTop: 1 }} />
+                <div style={{ flex: 1 }}>
+                  {captureError === 'camera' && <div>Camera access was blocked.</div>}
+                  <div>
+                    <strong>Screen Recording needs an app restart.</strong> macOS doesn’t apply this
+                    permission until Millimore is relaunched — even if it already shows as enabled in
+                    System Settings.
+                  </div>
+                  <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                    {bridge?.restart && (
+                      <Button size="sm" onClick={() => bridge.restart()}>
+                        Restart Millimore
+                      </Button>
+                    )}
+                    {bridge?.capture?.openScreenPrefs && (
+                      <Button variant="secondary" size="sm" onClick={() => bridge.capture.openScreenPrefs()}>
+                        Open settings
+                      </Button>
+                    )}
+                  </div>
                 </div>
               </div>
             )}
