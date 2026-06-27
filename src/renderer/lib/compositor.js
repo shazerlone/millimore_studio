@@ -138,18 +138,22 @@ export class StreamCompositor {
     }
 
     if (this.cameraVideo.readyState >= 2) {
-      const camW = Math.round(width * 0.26)
-      const camH = Math.round(camW * 0.75)
-      const x = width - camW - Math.round(width * 0.012)
-      const y = height - camH - Math.round(height * 0.022)
+      const cam = this.getOverlay?.()?.config?.camera || { shape: 'rectangle', x: 0.71, y: 0.68, w: 0.26 }
+      const isRound = cam.shape === 'square' || cam.shape === 'circle'
+      const camW = Math.round(width * cam.w)
+      const camH = Math.round(isRound ? camW : camW * 0.75)
+      const x = Math.round(cam.x * width)
+      const y = Math.round(cam.y * height)
+
       ctx.save()
-      roundRect(ctx, x, y, camW, camH, 12)
+      this._cameraClip(ctx, cam.shape, x, y, camW, camH)
       ctx.clip()
-      ctx.drawImage(this.cameraVideo, x, y, camW, camH)
+      // cover-fit the camera into the shape box
+      drawCover(ctx, this.cameraVideo, x, y, camW, camH)
       ctx.restore()
-      ctx.lineWidth = 3
-      ctx.strokeStyle = 'rgba(255,255,255,0.85)'
-      roundRect(ctx, x, y, camW, camH, 12)
+      ctx.lineWidth = Math.max(2, width * 0.0016)
+      ctx.strokeStyle = 'rgba(255,255,255,0.9)'
+      this._cameraClip(ctx, cam.shape, x, y, camW, camH)
       ctx.stroke()
     }
 
@@ -159,6 +163,18 @@ export class StreamCompositor {
       } catch (err) {
         console.error('Overlay paint error:', err)
       }
+    }
+  }
+
+  /** Build the clip path for the camera box based on its shape. */
+  _cameraClip(ctx, shape, x, y, w, h) {
+    if (shape === 'circle' || shape === 'oval') {
+      ctx.beginPath()
+      ctx.ellipse(x + w / 2, y + h / 2, w / 2, h / 2, 0, 0, Math.PI * 2)
+      ctx.closePath()
+    } else {
+      const r = Math.min(w, h) * (shape === 'square' ? 0.12 : 0.08)
+      roundRect(ctx, x, y, w, h, r)
     }
   }
 
@@ -187,4 +203,20 @@ function roundRect(ctx, x, y, w, h, r) {
   ctx.arcTo(x, y + h, x, y, r)
   ctx.arcTo(x, y, x + w, y, r)
   ctx.closePath()
+}
+
+/** Draw a video into a box with object-fit: cover (center-crop). */
+function drawCover(ctx, video, dx, dy, dw, dh) {
+  const vw = video.videoWidth
+  const vh = video.videoHeight
+  if (!vw || !vh) {
+    ctx.drawImage(video, dx, dy, dw, dh)
+    return
+  }
+  const scale = Math.max(dw / vw, dh / vh)
+  const sw = dw / scale
+  const sh = dh / scale
+  const sx = (vw - sw) / 2
+  const sy = (vh - sh) / 2
+  ctx.drawImage(video, sx, sy, sw, sh, dx, dy, dw, dh)
 }

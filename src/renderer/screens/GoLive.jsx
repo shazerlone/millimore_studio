@@ -17,13 +17,14 @@ import {
 import { ScreenSourcePicker } from '@components/ScreenSourcePicker'
 import { StreamKeyGuide, STREAM_KEY_GUIDES } from '@components/StreamKeyGuide'
 import { TradePlacement } from '@components/TradePlacement'
+import { CoachMarks, GO_LIVE_TOUR } from '@components/CoachMarks'
 import { destinations as DESTS, qualityOptions } from '../data/mock'
 import { formatElapsed } from '../lib/quality'
 import { StreamCompositor } from '../lib/compositor'
 import { useApp } from '../store'
 
 export function GoLive() {
-  const { bridge, isLive, setIsLive, overlayConfig, overlayEnabled, setOverlayEnabled, streamStats, pushToast } = useApp()
+  const { bridge, isLive, setIsLive, overlayConfig, updateOverlay, overlayEnabled, setOverlayEnabled, streamStats, pushToast } = useApp()
 
   const [title, setTitle] = useState('London Open — Gold Scalping')
   const [quality, setQuality] = useState('1080p30')
@@ -49,11 +50,14 @@ export function GoLive() {
   // connection health
   const [health, setHealth] = useState(null) // { state, ... }
 
-  // modals
+  // camera preview stream (state so the preview re-renders on acquire)
+  const [camStream, setCamStream] = useState(null)
+
+  // modals / guide
   const [showPicker, setShowPicker] = useState(false)
   const [guidePlatform, setGuidePlatform] = useState(null)
+  const [showGuide, setShowGuide] = useState(false)
 
-  const cameraRef = useRef(null)
   const screenRef = useRef(null)
   const cameraStream = useRef(null)
   const screenStream = useRef(null)
@@ -114,7 +118,7 @@ export function GoLive() {
       audio: micId ? { deviceId: { exact: micId } } : true
     })
     cameraStream.current = stream
-    if (cameraRef.current) cameraRef.current.srcObject = stream
+    setCamStream(stream)
     setHasCamera(true)
     return stream
   }
@@ -151,6 +155,19 @@ export function GoLive() {
     clearTimeout(tradeHideTimer.current)
     screenStream.current?.getTracks().forEach((t) => t.stop())
   }, [])
+
+  // Show the walkthrough on first visit.
+  useEffect(() => {
+    if (!bridge) return
+    bridge.settings.get('goLiveGuideSeen').then((seen) => {
+      if (!seen) setTimeout(() => setShowGuide(true), 700)
+    })
+  }, [bridge])
+
+  const closeGuide = () => {
+    setShowGuide(false)
+    bridge?.settings.set('goLiveGuideSeen', true)
+  }
 
   // ---- manual trade placement (drives the on-stream overlay card) ----
   const placeTrade = (trade) => {
@@ -337,25 +354,30 @@ export function GoLive() {
           {health && ['reconnecting', 'unstable', 'failed', 'reconnected'].includes(health.state) && (
             <HealthBanner health={health} />
           )}
-          <StreamPreview
-            live={isLive}
-            elapsed={elapsed}
-            overlayTrade={overlayEnabled ? overlayTrade : null}
-            overlayConfig={overlayConfig}
-            cameraRef={cameraRef}
-            screenRef={screenRef}
-            hasScreen={hasScreen}
-            hasCamera={hasCamera}
-          />
+          <div data-coach="camera">
+            <StreamPreview
+              live={isLive}
+              elapsed={elapsed}
+              overlayTrade={overlayEnabled ? overlayTrade : null}
+              overlayConfig={overlayConfig}
+              cameraStream={camStream}
+              screenRef={screenRef}
+              hasScreen={hasScreen}
+              hasCamera={hasCamera}
+              onCameraChange={(cam) => updateOverlay({ camera: cam })}
+            />
+          </div>
 
           {/* trade placement — the primary control while streaming */}
-          <TradePlacement
-            live={isLive}
-            active={!!overlayTrade}
-            onPlace={placeTrade}
-            onClose={closeTradeCard}
-            onHide={hideTradeCard}
-          />
+          <div data-coach="trade">
+            <TradePlacement
+              live={isLive}
+              active={!!overlayTrade}
+              onPlace={placeTrade}
+              onClose={closeTradeCard}
+              onHide={hideTradeCard}
+            />
+          </div>
 
           {/* capture controls */}
           <Card padding={14}>
@@ -366,6 +388,7 @@ export function GoLive() {
                 icon={<VideoIcon size={16} />}
                 onClick={() => setShowPicker(true)}
                 disabled={isLive}
+                data-coach="screen"
               >
                 {hasScreen ? 'Change screen' : 'Select screen to share'}
               </Button>
@@ -482,7 +505,7 @@ export function GoLive() {
           {!isLive ? (
             <>
               {/* destinations */}
-              <div>
+              <div data-coach="destinations">
                 <SubLabel>Destinations</SubLabel>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                   {DESTS.map((d) => (
@@ -561,7 +584,7 @@ export function GoLive() {
               STOP STREAM
             </Button>
           ) : (
-            <Button variant="primary" size="xl" full onClick={goLive} disabled={starting} icon={!starting && <LiveIcon size={20} />}>
+            <Button variant="primary" size="xl" full onClick={goLive} disabled={starting} icon={!starting && <LiveIcon size={20} />} data-coach="golive">
               {starting ? <Spinner size={18} color="#fff" /> : 'GO LIVE'}
             </Button>
           )}
@@ -570,6 +593,31 @@ export function GoLive() {
 
       {showPicker && <ScreenSourcePicker onPick={pickScreen} onClose={() => setShowPicker(false)} />}
       {guidePlatform && <StreamKeyGuide platform={guidePlatform} onClose={() => setGuidePlatform(null)} />}
+      {showGuide && <CoachMarks steps={GO_LIVE_TOUR} onClose={closeGuide} />}
+
+      {/* floating help button — reopens the walkthrough */}
+      <button
+        onClick={() => setShowGuide(true)}
+        title="Show tips & guide"
+        style={{
+          position: 'fixed',
+          left: 256,
+          bottom: 22,
+          width: 44,
+          height: 44,
+          borderRadius: '50%',
+          background: colors.primary,
+          color: '#fff',
+          boxShadow: '0 8px 24px rgba(37,99,235,0.4)',
+          display: 'grid',
+          placeItems: 'center',
+          zIndex: 50,
+          fontSize: 20,
+          fontWeight: 700
+        }}
+      >
+        ?
+      </button>
     </Page>
   )
 }

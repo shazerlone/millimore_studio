@@ -11,6 +11,9 @@ const DEFAULT_OVERLAY = {
   theme: 'dark', // dark | light
   fields: { pair: true, direction: true, entry: true, sl: true, tp: true, lot: true },
   showCopy: true,
+  // Camera picture-in-picture layout (normalized to the canvas, 0–1).
+  // shape: rectangle | square | circle | oval
+  camera: { shape: 'rectangle', x: 0.71, y: 0.68, w: 0.26 },
   // Persistent Millimore brand watermark — expands into the trade card.
   watermark: { enabled: true, opacity: 0.92 },
   // Scrolling lower-third ticker (disclaimer / links / subscribers).
@@ -85,7 +88,8 @@ export function AppProvider({ children }) {
         ...patch,
         fields: { ...c.fields, ...(patch.fields || {}) },
         watermark: { ...c.watermark, ...(patch.watermark || {}) },
-        ticker: { ...c.ticker, ...(patch.ticker || {}) }
+        ticker: { ...c.ticker, ...(patch.ticker || {}) },
+        camera: { ...c.camera, ...(patch.camera || {}) }
       }
       bridge?.settings.set('overlayConfig', next)
       return next
