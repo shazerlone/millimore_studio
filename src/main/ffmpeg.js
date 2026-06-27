@@ -2,6 +2,11 @@ import { spawn } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import ffmpegStatic from 'ffmpeg-static'
 
+// When packaged, ffmpeg-static's binary lives in app.asar.unpacked (see the
+// `asarUnpack` rule in package.json) — the path it reports still points inside
+// app.asar, so remap it to the unpacked, executable location.
+const FFMPEG_PATH = (ffmpegStatic || '').replace('app.asar', 'app.asar.unpacked')
+
 /**
  * RTMP ingest endpoints for every supported destination.
  * The trader's per-platform stream key is appended at runtime.
@@ -85,7 +90,7 @@ export class MultistreamEngine extends EventEmitter {
       teeOutput
     ]
 
-    this.proc = spawn(ffmpegStatic, args, { stdio: ['pipe', 'pipe', 'pipe'] })
+    this.proc = spawn(FFMPEG_PATH, args, { stdio: ['pipe', 'pipe', 'pipe'] })
     this.live = true
     this.startedAt = Date.now()
 
