@@ -10,7 +10,21 @@ const DEFAULT_OVERLAY = {
   style: 'detailed', // minimal | detailed | full
   theme: 'dark', // dark | light
   fields: { pair: true, direction: true, entry: true, sl: true, tp: true, lot: true },
-  showCopy: true
+  showCopy: true,
+  // Persistent Millimore brand watermark — expands into the trade card.
+  watermark: { enabled: true, opacity: 0.92 },
+  // Scrolling lower-third ticker (disclaimer / links / subscribers).
+  ticker: {
+    enabled: true,
+    position: 'bottom', // top | bottom
+    theme: 'dark',
+    speed: 60, // px / second
+    items: [
+      { id: 'disc', type: 'disclaimer', text: 'Not financial advice · Trade at your own risk' },
+      { id: 'yt', type: 'link', text: 'YouTube: @marcussterling' },
+      { id: 'subs', type: 'subscribers', text: '12.4K subscribers' }
+    ]
+  }
 }
 
 export function AppProvider({ children }) {
@@ -33,7 +47,13 @@ export function AppProvider({ children }) {
 
   const updateOverlay = (patch) => {
     setOverlayConfig((c) => {
-      const next = { ...c, ...patch, fields: { ...c.fields, ...(patch.fields || {}) } }
+      const next = {
+        ...c,
+        ...patch,
+        fields: { ...c.fields, ...(patch.fields || {}) },
+        watermark: { ...c.watermark, ...(patch.watermark || {}) },
+        ticker: { ...c.ticker, ...(patch.ticker || {}) }
+      }
       bridge?.settings.set('overlayConfig', next)
       return next
     })

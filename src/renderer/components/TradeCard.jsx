@@ -2,6 +2,37 @@ import { colors, radius } from '@theme/colors'
 import { ArrowUpRightIcon, ArrowDownRightIcon, CopyIcon } from './Icons'
 import { Star } from './Logo'
 
+/** Slim Millimore brand header — the watermark, expanded into the trade card. */
+function BrandHeader({ dark, line, sub }) {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6,
+        padding: '8px 14px 8px 16px',
+        borderBottom: `1px solid ${line}`,
+        background: dark ? 'rgba(255,255,255,0.03)' : colors.surfaceMuted
+      }}
+    >
+      <Star size={13} />
+      <span style={{ fontWeight: 800, fontSize: 12, letterSpacing: '-0.01em' }}>millimore</span>
+      <span
+        style={{
+          marginLeft: 'auto',
+          fontSize: 9,
+          fontWeight: 800,
+          letterSpacing: '0.1em',
+          textTransform: 'uppercase',
+          color: sub
+        }}
+      >
+        Live Trade
+      </span>
+    </div>
+  )
+}
+
 /**
  * The on-stream trade card. Renders in three styles (minimal / detailed / full),
  * dark or light, with per-field visibility — the exact knobs in the Overlay
@@ -23,6 +54,7 @@ export function TradeCard({
   theme = 'dark',
   fields = { pair: true, direction: true, entry: true, sl: true, tp: true, lot: true },
   showCopy = true,
+  branded = true,
   scale = 1,
   exiting = false
 }) {
@@ -105,6 +137,7 @@ export function TradeCard({
     return (
       <div style={shell}>
         <Edge />
+        {branded && <BrandHeader dark={dark} line={c.line} sub={c.sub} />}
         <div style={{ padding: '14px 16px 14px 18px', display: 'flex', alignItems: 'center', gap: 12 }}>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -166,6 +199,7 @@ export function TradeCard({
   return (
     <div style={shell}>
       <Edge />
+      {branded && <BrandHeader dark={dark} line={c.line} sub={c.sub} />}
       <div style={{ padding: '16px 18px 16px 20px', display: 'flex', flexDirection: 'column', gap: 14 }}>
         {/* trader row (full only) */}
         {isFull && (

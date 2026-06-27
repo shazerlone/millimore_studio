@@ -1,6 +1,8 @@
 import { colors, radius } from '@theme/colors'
 import { typography } from '@theme/typography'
 import { TradeCard } from './TradeCard'
+import { Watermark } from './Watermark'
+import { Ticker } from './Ticker'
 import { VideoIcon } from './Icons'
 
 /**
@@ -31,7 +33,9 @@ export function StreamPreview({
     style = 'detailed',
     theme = 'dark',
     fields,
-    showCopy = true
+    showCopy = true,
+    watermark = { enabled: true, opacity: 0.92 },
+    ticker = { enabled: false }
   } = overlayConfig
 
   const corner = {
@@ -71,19 +75,26 @@ export function StreamPreview({
       />
       {!hasScreen && <MockDesktop />}
 
-      {/* trade overlay */}
-      {overlayTrade && (
-        <div style={{ position: 'absolute', ...corner, zIndex: 3 }}>
+      {/* scrolling lower-third ticker */}
+      <Ticker config={ticker} />
+
+      {/* brand watermark + trade overlay share the same corner so the
+          watermark "expands" into the card when a trade fires */}
+      <div style={{ position: 'absolute', ...corner, zIndex: 6 }}>
+        {overlayTrade ? (
           <TradeCard
             trade={overlayTrade}
             style={style}
             theme={theme}
             fields={fields}
             showCopy={showCopy}
+            branded
             scale={0.82}
           />
-        </div>
-      )}
+        ) : (
+          watermark.enabled && <Watermark opacity={watermark.opacity} />
+        )}
+      </div>
 
       {/* camera PiP — bottom right */}
       <div

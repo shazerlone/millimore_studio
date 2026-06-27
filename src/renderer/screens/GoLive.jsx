@@ -54,6 +54,13 @@ export function GoLive() {
   const timerRef = useRef(null)
   const startedAt = useRef(null)
 
+  // Live refs so the compositor's per-frame painter sees current values
+  // (config edits + the active trade) without restarting the stream.
+  const overlayConfigRef = useRef(overlayConfig)
+  const overlayTradeRef = useRef(null)
+  overlayConfigRef.current = overlayConfig
+  overlayTradeRef.current = overlayEnabled ? overlayTrade : null
+
   // Load saved stream keys (decrypted in main via safeStorage).
   useEffect(() => {
     if (!bridge) return
@@ -220,7 +227,10 @@ export function GoLive() {
           sourceId = sources[0]?.id
         }
         if (sourceId) {
-          compositor.current = new StreamCompositor({ quality })
+          compositor.current = new StreamCompositor({
+            quality,
+            getOverlay: () => ({ config: overlayConfigRef.current, trade: overlayTradeRef.current })
+          })
           await compositor.current.start(sourceId, cameraStream.current)
         }
         // Pipe microphone audio into the encode.

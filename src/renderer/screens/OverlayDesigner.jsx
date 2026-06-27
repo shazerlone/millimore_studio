@@ -1,9 +1,11 @@
 import { colors, radius } from '@theme/colors'
 import { typography } from '@theme/typography'
 import { Page, PageHeader } from '@components/Page'
-import { Card, Toggle, Badge } from '@components/ui'
+import { Card, Toggle, Badge, Input, Button } from '@components/ui'
 import { TradeCard } from '@components/TradeCard'
-import { CheckIcon } from '@components/Icons'
+import { Ticker } from '@components/Ticker'
+import { Watermark } from '@components/Watermark'
+import { CheckIcon, PlusIcon } from '@components/Icons'
 import { sampleTrade } from '../data/mock'
 import { useApp } from '../store'
 
@@ -63,16 +65,32 @@ export function OverlayDesigner() {
               }}
             >
               <FakeStream />
-              <div style={{ position: 'absolute', ...corner }}>
+              <Ticker config={cfg.ticker} />
+              <div style={{ position: 'absolute', ...corner, zIndex: 6 }}>
                 <TradeCard
                   trade={sampleTrade}
                   style={cfg.style}
                   theme={cfg.theme}
                   fields={cfg.fields}
                   showCopy={cfg.showCopy}
+                  branded
                   scale={0.9}
                 />
               </div>
+              {/* show the standalone watermark in the opposite corner so its
+                  size/opacity is visible while the card occupies its corner */}
+              {cfg.watermark?.enabled && (
+                <div
+                  style={{
+                    position: 'absolute',
+                    [cfg.position.includes('top') ? 'bottom' : 'top']: 14,
+                    [cfg.position.includes('left') ? 'right' : 'left']: 14,
+                    zIndex: 6
+                  }}
+                >
+                  <Watermark opacity={cfg.watermark.opacity} />
+                </div>
+              )}
             </div>
             <p style={{ ...typography.small, color: colors.textSecondary, margin: '12px 4px 0' }}>
               Pick a corner below to position the card. This is exactly how it appears to your viewers.
@@ -169,6 +187,93 @@ export function OverlayDesigner() {
           <Row label="Always show Copy button">
             <Toggle checked={cfg.showCopy} onChange={(v) => updateOverlay({ showCopy: v })} />
           </Row>
+
+          {/* ---- Millimore watermark ---- */}
+          <Group title="Millimore watermark">
+            <Row label="Show watermark on stream">
+              <Toggle
+                checked={cfg.watermark.enabled}
+                onChange={(v) => updateOverlay({ watermark: { enabled: v } })}
+              />
+            </Row>
+            {cfg.watermark.enabled && (
+              <div style={{ marginTop: 12 }}>
+                <div style={{ ...typography.caption, color: colors.textSecondary, marginBottom: 6 }}>
+                  Opacity — {Math.round(cfg.watermark.opacity * 100)}%
+                </div>
+                <input
+                  type="range"
+                  min="0.3"
+                  max="1"
+                  step="0.02"
+                  value={cfg.watermark.opacity}
+                  onChange={(e) => updateOverlay({ watermark: { opacity: Number(e.target.value) } })}
+                  style={{ width: '100%', accentColor: colors.primary }}
+                />
+                <div style={{ ...typography.small, color: colors.textTertiary, marginTop: 4 }}>
+                  Sits at the same corner as your trade card and expands into it when a trade fires.
+                </div>
+              </div>
+            )}
+          </Group>
+
+          {/* ---- Scrolling ticker ---- */}
+          <Group title="Scrolling ticker">
+            <Row label="Show ticker banner">
+              <Toggle
+                checked={cfg.ticker.enabled}
+                onChange={(v) => updateOverlay({ ticker: { enabled: v } })}
+              />
+            </Row>
+
+            {cfg.ticker.enabled && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 14, marginTop: 12 }}>
+                <div>
+                  <div style={{ ...typography.caption, color: colors.textSecondary, marginBottom: 8 }}>Position</div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                    <ChoiceButton active={cfg.ticker.position === 'top'} onClick={() => updateOverlay({ ticker: { position: 'top' } })}>
+                      Top
+                    </ChoiceButton>
+                    <ChoiceButton active={cfg.ticker.position === 'bottom'} onClick={() => updateOverlay({ ticker: { position: 'bottom' } })}>
+                      Bottom
+                    </ChoiceButton>
+                  </div>
+                </div>
+
+                <div>
+                  <div style={{ ...typography.caption, color: colors.textSecondary, marginBottom: 8 }}>Style</div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                    <ChoiceButton active={cfg.ticker.theme === 'dark'} onClick={() => updateOverlay({ ticker: { theme: 'dark' } })}>
+                      Dark
+                    </ChoiceButton>
+                    <ChoiceButton active={cfg.ticker.theme === 'light'} onClick={() => updateOverlay({ ticker: { theme: 'light' } })}>
+                      Light
+                    </ChoiceButton>
+                  </div>
+                </div>
+
+                <div>
+                  <div style={{ ...typography.caption, color: colors.textSecondary, marginBottom: 6 }}>
+                    Scroll speed — {cfg.ticker.speed} px/s
+                  </div>
+                  <input
+                    type="range"
+                    min="20"
+                    max="140"
+                    step="5"
+                    value={cfg.ticker.speed}
+                    onChange={(e) => updateOverlay({ ticker: { speed: Number(e.target.value) } })}
+                    style={{ width: '100%', accentColor: colors.primary }}
+                  />
+                </div>
+
+                <TickerItemsEditor
+                  items={cfg.ticker.items}
+                  onChange={(items) => updateOverlay({ ticker: { items } })}
+                />
+              </div>
+            )}
+          </Group>
         </Card>
       </div>
     </Page>
@@ -213,6 +318,76 @@ function ChoiceButton({ active, onClick, children }) {
     >
       {children}
     </button>
+  )
+}
+
+function TickerItemsEditor({ items, onChange }) {
+  const TYPES = [
+    { value: 'disclaimer', label: 'Disclaimer' },
+    { value: 'link', label: 'Link' },
+    { value: 'subscribers', label: 'Subscribers' },
+    { value: 'custom', label: 'Custom' }
+  ]
+  const update = (id, patch) => onChange(items.map((it) => (it.id === id ? { ...it, ...patch } : it)))
+  const remove = (id) => onChange(items.filter((it) => it.id !== id))
+  const add = () =>
+    onChange([...items, { id: `i${Date.now()}`, type: 'custom', text: '' }])
+
+  return (
+    <div>
+      <div style={{ ...typography.caption, color: colors.textSecondary, marginBottom: 8 }}>
+        Ticker messages
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {items.map((it) => (
+          <div key={it.id} style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+            <select
+              value={it.type}
+              onChange={(e) => update(it.id, { type: e.target.value })}
+              style={{
+                fontSize: 12,
+                padding: '8px 6px',
+                borderRadius: radius.button,
+                border: `1px solid ${colors.borderStrong}`,
+                background: '#fff',
+                flexShrink: 0
+              }}
+            >
+              {TYPES.map((t) => (
+                <option key={t.value} value={t.value}>{t.label}</option>
+              ))}
+            </select>
+            <Input
+              value={it.text}
+              placeholder="Message text…"
+              onChange={(e) => update(it.id, { text: e.target.value })}
+              style={{ fontSize: 13, padding: '8px 10px' }}
+            />
+            <button
+              onClick={() => remove(it.id)}
+              aria-label="Remove"
+              style={{
+                flexShrink: 0,
+                width: 32,
+                height: 32,
+                borderRadius: radius.button,
+                border: `1px solid ${colors.borderStrong}`,
+                color: colors.textSecondary,
+                fontSize: 16,
+                lineHeight: 1
+              }}
+            >
+              ×
+            </button>
+          </div>
+        ))}
+      </div>
+      <div style={{ marginTop: 10 }}>
+        <Button variant="secondary" size="sm" icon={<PlusIcon size={15} />} onClick={add}>
+          Add message
+        </Button>
+      </div>
+    </div>
   )
 }
 

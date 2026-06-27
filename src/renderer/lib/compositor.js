@@ -1,4 +1,5 @@
 import { QUALITY_DIMS } from './quality'
+import { paintOverlay } from './overlayPainter'
 
 /**
  * StreamCompositor draws the screen capture and camera into a single canvas
@@ -12,12 +13,14 @@ import { QUALITY_DIMS } from './quality'
  * which the caller can supply.
  */
 export class StreamCompositor {
-  constructor({ quality = '1080p30', drawOverlay = null } = {}) {
+  constructor({ quality = '1080p30', getOverlay = null } = {}) {
     const dims = QUALITY_DIMS[quality] || QUALITY_DIMS['1080p30']
     this.width = dims.width
     this.height = dims.height
     this.fps = dims.fps
-    this.drawOverlay = drawOverlay
+    // Returns the current overlay state ({ config, trade }) each frame so the
+    // painter reflects live changes without restarting the compositor.
+    this.getOverlay = getOverlay
 
     this.canvas = document.createElement('canvas')
     this.canvas.width = this.width
@@ -103,8 +106,15 @@ export class StreamCompositor {
       ctx.stroke()
     }
 
-    // trade overlay (caller-supplied painter)
-    if (this.drawOverlay) this.drawOverlay(ctx, width, height)
+    // Millimore overlay: ticker + watermark + branded trade card.
+    if (this.getOverlay) {
+      try {
+        paintOverlay(ctx, width, height, this.getOverlay(), performance.now())
+      } catch (err) {
+        // Never let an overlay paint error break the broadcast.
+        console.error('Overlay paint error:', err)
+      }
+    }
   }
 
   _emitFrame() {
