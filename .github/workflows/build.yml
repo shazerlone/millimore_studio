@@ -1,7 +1,8 @@
 name: Build Millimore Desktop
 
 # Builds the app on GitHub's runners (so you don't need a local toolchain) and
-# uploads downloadable installers for macOS and Windows.
+# uploads downloadable installers. macOS is built for BOTH Apple Silicon (arm64)
+# and Intel (x64) so the app runs on every Mac — download the one for your chip.
 on:
   push:
     branches:
@@ -26,26 +27,17 @@ jobs:
       - name: Build (electron-vite)
         run: npm run build
 
-  # Package downloadable installers per OS.
-  package:
-    name: Package (${{ matrix.os }})
+  # macOS — one build per architecture so it runs on Intel AND Apple Silicon.
+  package-mac:
+    name: Package macOS (${{ matrix.arch }})
     needs: verify
-    runs-on: ${{ matrix.os }}
+    runs-on: macos-latest
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: macos-latest
-            script: package:mac
-            artifact: millimore-desktop-mac
-            glob: |
-              release/*.dmg
-              release/*.zip
-          - os: windows-latest
-            script: package:win
-            artifact: millimore-desktop-windows
-            glob: |
-              release/*.exe
+        arch:
+          - arm64 # Apple Silicon: M1 / M2 / M3 / M4
+          - x64 # Intel
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -54,16 +46,51 @@ jobs:
           cache: npm
       - name: Install dependencies
         run: npm ci
-      - name: Package
-        run: npm run ${{ matrix.script }}
+      - name: Fetch FFmpeg binary for ${{ matrix.arch }}
+        # ffmpeg-static only downloads the host arch on install; re-fetch the
+        # correct one for the target so the packaged app's FFmpeg matches.
+        run: npm rebuild ffmpeg-static
         env:
-          # Build unsigned — no Apple/Windows code-signing certs required.
-          CSC_IDENTITY_AUTO_DISCOVERY: false
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          npm_config_arch: ${{ matrix.arch }}
+      - name: Build bundles
+        run: npm run build
+      - name: Package (.dmg + .zip)
+        run: npx electron-builder --mac --${{ matrix.arch }} --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false # unsigned — no Apple cert needed
       - name: Upload installers
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.glob }}
+          name: millimore-desktop-mac-${{ matrix.arch }}
+          path: |
+            release/*.dmg
+            release/*.zip
+          if-no-files-found: warn
+          retention-days: 14
+
+  # Windows (x64 — covers virtually all Windows PCs).
+  package-win:
+    name: Package Windows
+    needs: verify
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Build bundles
+        run: npm run build
+      - name: Package (.exe)
+        run: npx electron-builder --win --x64 --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: millimore-desktop-windows
+          path: release/*.exe
           if-no-files-found: warn
           retention-days: 14
