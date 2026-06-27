@@ -4,13 +4,22 @@ import { typography } from '@theme/typography'
 import { Page, PageHeader } from '@components/Page'
 import { StreamPreview } from '@components/StreamPreview'
 import { Card, Field, Input, Select, Toggle, Badge, Button, Spinner } from '@components/ui'
-import { LiveIcon, LockIcon, SignalIcon, LayersIcon, CheckIcon, VideoIcon, MicIcon, InfoIcon } from '@components/Icons'
+import {
+  LiveIcon,
+  LockIcon,
+  SignalIcon,
+  LayersIcon,
+  CheckIcon,
+  VideoIcon,
+  MicIcon,
+  InfoIcon
+} from '@components/Icons'
 import { ScreenSourcePicker } from '@components/ScreenSourcePicker'
 import { StreamKeyGuide, STREAM_KEY_GUIDES } from '@components/StreamKeyGuide'
-import { destinations as DESTS, qualityOptions, sampleTrade } from '../data/mock'
+import { TradePlacement } from '@components/TradePlacement'
+import { destinations as DESTS, qualityOptions } from '../data/mock'
 import { formatElapsed } from '../lib/quality'
 import { StreamCompositor } from '../lib/compositor'
-import { AudioStreamer } from '../lib/audioCapture'
 import { useApp } from '../store'
 
 export function GoLive() {
@@ -49,9 +58,9 @@ export function GoLive() {
   const cameraStream = useRef(null)
   const screenStream = useRef(null)
   const compositor = useRef(null)
-  const audioStreamer = useRef(null)
   const timerRef = useRef(null)
   const startedAt = useRef(null)
+  const tradeHideTimer = useRef(null)
 
   // Live refs so the compositor's per-frame painter sees current values
   // (config edits + the active trade) without restarting the stream.
@@ -114,15 +123,11 @@ export function GoLive() {
   const changeDevice = async (kind, id) => {
     if (kind === 'cam') setCamId(id)
     else setMicId(id)
-    // Defer so state is set before re-acquire reads it.
+    // Defer so state is set before re-acquire reads it. The mic track is muxed
+    // by the compositor's recorder, so re-acquiring updates it live.
     setTimeout(async () => {
       try {
-        const stream = await acquireCamera()
-        if (isLive && kind === 'mic') {
-          audioStreamer.current?.stop()
-          audioStreamer.current = new AudioStreamer()
-          audioStreamer.current.start(stream)
-        }
+        await acquireCamera()
       } catch (err) {
         console.error('Device switch failed:', err)
       }
@@ -141,19 +146,30 @@ export function GoLive() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bridge])
 
-  // Subscribe to live trade events to drive the overlay preview.
-  useEffect(() => {
-    if (!bridge) return
-    return bridge.mt5.onTrade((t) => {
-      if (t.overlay === 'hide') setOverlayTrade(null)
-      else setOverlayTrade(t)
-    })
-  }, [bridge])
-
   useEffect(() => () => {
     clearInterval(timerRef.current)
+    clearTimeout(tradeHideTimer.current)
     screenStream.current?.getTracks().forEach((t) => t.stop())
   }, [])
+
+  // ---- manual trade placement (drives the on-stream overlay card) ----
+  const placeTrade = (trade) => {
+    clearTimeout(tradeHideTimer.current)
+    setOverlayTrade({ ...trade, event: 'open', ts: Date.now() })
+    // Auto-hide after the card's lifetime unless the trader hides it sooner.
+    tradeHideTimer.current = setTimeout(() => setOverlayTrade(null), 14000)
+  }
+
+  const closeTradeCard = () => {
+    clearTimeout(tradeHideTimer.current)
+    setOverlayTrade((t) => (t ? { ...t, event: 'close' } : null))
+    tradeHideTimer.current = setTimeout(() => setOverlayTrade(null), 6000)
+  }
+
+  const hideTradeCard = () => {
+    clearTimeout(tradeHideTimer.current)
+    setOverlayTrade(null)
+  }
 
   // ---- screen capture ----
   const pickScreen = async (source) => {
@@ -218,11 +234,10 @@ export function GoLive() {
       platform: d.platform,
       key: keys[d.platform] || ''
     }))
-    const micOn = !!cameraStream.current?.getAudioTracks?.().length
     try {
       if (bridge) {
-        // Composite the chosen screen + camera FIRST so a screen-permission
-        // failure surfaces before we open RTMP connections.
+        // Set up the compositor + recorder FIRST so a screen-permission failure
+        // surfaces before we open RTMP connections.
         let sourceId = screenSource?.id
         if (!sourceId) {
           const sources = await bridge.capture.getSources()
@@ -234,20 +249,17 @@ export function GoLive() {
           quality,
           getOverlay: () => ({ config: overlayConfigRef.current, trade: overlayTradeRef.current })
         })
-        await compositor.current.start(sourceId, cameraStream.current)
+        const { videoCopy } = await compositor.current.prepare(sourceId, cameraStream.current)
 
+        // Start FFmpeg, then begin emitting chunks (so the WebM header isn't lost).
         await bridge.stream.start({
           quality,
           destinations: dests,
           title,
-          audio: micOn,
+          videoCopy,
           overlayRelayKey: keys.millimore || 'demo'
         })
-
-        if (micOn) {
-          audioStreamer.current = new AudioStreamer()
-          audioStreamer.current.start(cameraStream.current)
-        }
+        compositor.current.beginRecording(250)
       }
       setIsLive(true)
       startTimer()
@@ -256,7 +268,6 @@ export function GoLive() {
         `You're live${dests.length ? ` to ${dests.length} destination${dests.length > 1 ? 's' : ''}` : ''}!`,
         'success'
       )
-      if (overlayEnabled) setTimeout(() => setOverlayTrade(sampleTrade), 2500)
     } catch (err) {
       console.error('Failed to go live:', err)
       // Roll back any partial start.
@@ -284,10 +295,9 @@ export function GoLive() {
   const stopStream = async () => {
     compositor.current?.stop()
     compositor.current = null
-    audioStreamer.current?.stop()
-    audioStreamer.current = null
     await bridge?.stream.stop()
     clearInterval(timerRef.current)
+    clearTimeout(tradeHideTimer.current)
     setElapsed('00:00:00')
     setOverlayTrade(null)
     setHealth(null)
@@ -328,6 +338,15 @@ export function GoLive() {
             screenRef={screenRef}
             hasScreen={hasScreen}
             hasCamera={hasCamera}
+          />
+
+          {/* trade placement — the primary control while streaming */}
+          <TradePlacement
+            live={isLive}
+            active={!!overlayTrade}
+            onPlace={placeTrade}
+            onClose={closeTradeCard}
+            onHide={hideTradeCard}
           />
 
           {/* capture controls */}
@@ -430,58 +449,69 @@ export function GoLive() {
           <LiveStatsBar stats={streamStats} live={isLive} activeCount={activeCount} quality={quality} />
         </div>
 
-        {/* RIGHT — controls */}
+        {/* RIGHT — controls (full setup when idle, compact when live) */}
         <Card padding={20} style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
           <Field label="Stream title">
-            <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="What are you trading today?" />
+            <Input
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              placeholder="What are you trading today?"
+              disabled={isLive}
+            />
           </Field>
 
-          {/* destinations */}
-          <div>
-            <SubLabel>Destinations</SubLabel>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-              {DESTS.map((d) => (
-                <DestinationRow
-                  key={d.platform}
-                  dest={d}
-                  on={enabled[d.platform]}
-                  onToggle={(v) => setEnabled((e) => ({ ...e, [d.platform]: v }))}
-                  keyValue={keys[d.platform] || ''}
-                  onKey={(v) => saveKey(d.platform, v)}
-                  onGuide={() => setGuidePlatform(d.platform)}
-                  hasGuide={!!STREAM_KEY_GUIDES[d.platform]}
-                  disabled={isLive}
-                />
-              ))}
-            </div>
-          </div>
+          {!isLive ? (
+            <>
+              {/* destinations */}
+              <div>
+                <SubLabel>Destinations</SubLabel>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  {DESTS.map((d) => (
+                    <DestinationRow
+                      key={d.platform}
+                      dest={d}
+                      on={enabled[d.platform]}
+                      onToggle={(v) => setEnabled((e) => ({ ...e, [d.platform]: v }))}
+                      keyValue={keys[d.platform] || ''}
+                      onKey={(v) => saveKey(d.platform, v)}
+                      onGuide={() => setGuidePlatform(d.platform)}
+                      hasGuide={!!STREAM_KEY_GUIDES[d.platform]}
+                      disabled={isLive}
+                    />
+                  ))}
+                </div>
+              </div>
 
-          {/* quality */}
-          <div>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <SubLabel>Stream quality</SubLabel>
-              <button
-                onClick={runSpeedTest}
-                disabled={testing}
-                style={{ ...typography.caption, color: colors.primary, display: 'inline-flex', alignItems: 'center', gap: 5 }}
-              >
-                {testing ? <Spinner size={12} /> : <SignalIcon size={13} />}
-                {speed?.mbps ? `${speed.mbps} Mbps` : 'Test speed'}
-              </button>
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {qualityOptions.map((q) => (
-                <QualityRow
-                  key={q.value}
-                  opt={q}
-                  selected={quality === q.value}
-                  recommended={speed?.recommended === q.value}
-                  onSelect={() => setQuality(q.value)}
-                  disabled={isLive}
-                />
-              ))}
-            </div>
-          </div>
+              {/* quality */}
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <SubLabel>Stream quality</SubLabel>
+                  <button
+                    onClick={runSpeedTest}
+                    disabled={testing}
+                    style={{ ...typography.caption, color: colors.primary, display: 'inline-flex', alignItems: 'center', gap: 5 }}
+                  >
+                    {testing ? <Spinner size={12} /> : <SignalIcon size={13} />}
+                    {speed?.mbps ? `${speed.mbps} Mbps` : 'Test speed'}
+                  </button>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {qualityOptions.map((q) => (
+                    <QualityRow
+                      key={q.value}
+                      opt={q}
+                      selected={quality === q.value}
+                      recommended={speed?.recommended === q.value}
+                      onSelect={() => setQuality(q.value)}
+                      disabled={isLive}
+                    />
+                  ))}
+                </div>
+              </div>
+            </>
+          ) : (
+            <LiveSummary elapsed={elapsed} dests={DESTS.filter((d) => enabled[d.platform])} quality={quality} />
+          )}
 
           {/* overlay toggle */}
           <div
@@ -498,9 +528,9 @@ export function GoLive() {
               <LayersIcon size={20} />
             </span>
             <div style={{ flex: 1 }}>
-              <div style={{ ...typography.bodyStrong, color: colors.textPrimary }}>MT5 trade overlay</div>
+              <div style={{ ...typography.bodyStrong, color: colors.textPrimary }}>Trade card overlay</div>
               <div style={{ ...typography.small, color: colors.textSecondary }}>
-                Show trade cards automatically when positions open or close
+                Show the trade card on stream when you place an order
               </div>
             </div>
             <Toggle checked={overlayEnabled} onChange={setOverlayEnabled} />
@@ -527,6 +557,46 @@ export function GoLive() {
 
 function SubLabel({ children }) {
   return <div style={{ ...typography.label, color: colors.textSecondary, marginBottom: 10 }}>{children}</div>
+}
+
+/** Compact read-only summary shown in place of the setup form while live. */
+function LiveSummary({ elapsed, dests, quality }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 10,
+          padding: '12px 14px',
+          borderRadius: radius.card,
+          background: colors.liveSoft
+        }}
+      >
+        <span style={{ width: 9, height: 9, borderRadius: '50%', background: colors.live, animation: 'mmPulse 1.2s infinite' }} />
+        <span style={{ ...typography.bodyStrong, color: colors.live }}>Live</span>
+        <span style={{ marginLeft: 'auto', fontVariantNumeric: 'tabular-nums', ...typography.bodyStrong, color: colors.textPrimary }}>
+          {elapsed}
+        </span>
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <span style={{ ...typography.caption, color: colors.textSecondary }}>Streaming to</span>
+        <div style={{ display: 'flex', gap: 6 }}>
+          {dests.map((d) => (
+            <span
+              key={d.platform}
+              title={d.label}
+              style={{ width: 10, height: 10, borderRadius: '50%', background: d.color }}
+            />
+          ))}
+        </div>
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <span style={{ ...typography.caption, color: colors.textSecondary }}>Quality</span>
+        <Badge tone="neutral">{quality.replace('p', 'p · ') + 'fps'}</Badge>
+      </div>
+    </div>
+  )
 }
 
 function HealthBanner({ health }) {

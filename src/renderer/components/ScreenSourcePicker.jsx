@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { colors, radius, shadow } from '@theme/colors'
 import { typography } from '@theme/typography'
 import { Button, Spinner, Badge } from './ui'
-import { VideoIcon } from './Icons'
+import { VideoIcon, EyeIcon } from './Icons'
 
 /**
  * Modal that lists every capturable screen and window (with live thumbnails
@@ -71,9 +71,7 @@ export function ScreenSourcePicker({ onPick, onClose }) {
         </div>
 
         <div style={{ padding: 22, overflowY: 'auto' }}>
-          {error && (
-            <div style={{ ...typography.body, color: colors.live }}>{error}</div>
-          )}
+          {error && <PermissionEmptyState />}
           {!sources && !error && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: colors.textSecondary }}>
               <Spinner size={18} /> Loading screens…
@@ -87,6 +85,47 @@ export function ScreenSourcePicker({ onPick, onClose }) {
             </>
           )}
         </div>
+      </div>
+    </div>
+  )
+}
+
+/** Friendly, modern empty state when screen capture is blocked by macOS. */
+function PermissionEmptyState() {
+  const bridge = window.millimore
+  return (
+    <div style={{ textAlign: 'center', padding: '24px 12px' }}>
+      <div
+        style={{
+          width: 56,
+          height: 56,
+          borderRadius: 14,
+          background: colors.primarySoft,
+          color: colors.primary,
+          display: 'grid',
+          placeItems: 'center',
+          margin: '0 auto 16px'
+        }}
+      >
+        <EyeIcon size={26} />
+      </div>
+      <h3 style={{ ...typography.h3, color: colors.textPrimary, margin: '0 0 6px' }}>
+        Screen Recording isn’t enabled yet
+      </h3>
+      <p style={{ ...typography.body, color: colors.textSecondary, margin: '0 auto 18px', maxWidth: 380 }}>
+        macOS needs permission to capture your screen. Enable <strong>Millimore Desktop</strong> under
+        System Settings → Privacy &amp; Security → Screen Recording, then restart the app. Make sure
+        the app lives in your <strong>Applications</strong> folder so the permission sticks.
+      </p>
+      <div style={{ display: 'flex', gap: 10, justifyContent: 'center' }}>
+        {bridge?.capture?.openScreenPrefs && (
+          <Button onClick={() => bridge.capture.openScreenPrefs()}>Open System Settings</Button>
+        )}
+        {bridge?.restart && (
+          <Button variant="secondary" onClick={() => bridge.restart()}>
+            Restart app
+          </Button>
+        )}
       </div>
     </div>
   )

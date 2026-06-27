@@ -23,8 +23,7 @@ const api = {
   stream: {
     start: (config) => ipcRenderer.invoke('stream:start', config),
     stop: () => ipcRenderer.invoke('stream:stop'),
-    pushFrame: (buffer) => ipcRenderer.send('stream:frame', buffer),
-    pushAudio: (buffer) => ipcRenderer.send('stream:audio', buffer),
+    pushChunk: (buffer) => ipcRenderer.send('stream:chunk', buffer),
     testSpeed: () => ipcRenderer.invoke('stream:testSpeed'),
     onStatus: (cb) => subscribe('stream:status', cb),
     onStats: (cb) => subscribe('stream:stats', cb)

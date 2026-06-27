@@ -50,10 +50,16 @@ export class MultistreamEngine extends EventEmitter {
   }
 
   /**
+   * The renderer compresses the composite (screen + camera + overlay + mic) with
+   * MediaRecorder and streams WebM chunks over IPC. FFmpeg only has to remux (or
+   * lightly transcode) those into RTMP and fan them out — far cheaper and lower
+   * latency than shipping raw frames.
+   *
    * @param {object} config
    * @param {string} config.quality      key of QUALITY_PRESETS
    * @param {Array<{platform:string, key:string}>} config.destinations
-   * @param {boolean} [config.audio]     true if the renderer will feed mic PCM
+   * @param {boolean} [config.videoCopy] true if the WebM video is already H.264
+   *                                     (so we can stream-copy instead of re-encoding)
    */
   start(config) {
     if (this.live) throw new Error('Stream already running')
@@ -62,7 +68,6 @@ export class MultistreamEngine extends EventEmitter {
 
     this.config = config
     this.userStopped = false
-    this.reconnects = 0
     this._stability = { lowSince: null }
 
     this._spawn()
@@ -83,84 +88,67 @@ export class MultistreamEngine extends EventEmitter {
     const preset = QUALITY_PRESETS[config.quality] || QUALITY_PRESETS['1080p30']
     const targets = this._buildTargets(config.destinations)
     const teeOutput = targets.map((url) => `[f=flv:onfail=ignore]${url}`).join('|')
-    const withMic = !!config.audio
 
-    const audioInput = withMic
-      ? ['-f', 's16le', '-ar', '48000', '-ac', '2', '-i', 'pipe:3'] // mic PCM on fd 3
-      : ['-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000']
+    // Video: copy if the browser already encoded H.264, otherwise transcode.
+    const videoArgs = config.videoCopy
+      ? ['-c:v', 'copy']
+      : [
+          '-c:v', 'libx264',
+          '-preset', 'veryfast',
+          '-tune', 'zerolatency',
+          '-pix_fmt', 'yuv420p',
+          '-b:v', preset.videoBitrate,
+          '-maxrate', preset.videoBitrate,
+          '-bufsize', preset.videoBitrate,
+          '-g', String(preset.fps * 2)
+        ]
 
     const args = [
-      // ---- raw RGBA video from the renderer canvas over stdin ----
-      '-f', 'rawvideo',
-      '-pix_fmt', 'rgba',
-      '-s', `${preset.width}x${preset.height}`,
-      '-r', String(preset.fps),
-      '-i', 'pipe:0',
-      ...audioInput,
-      // ---- video encode (single encode, fanned out by tee) ----
-      '-c:v', 'libx264',
-      '-preset', 'veryfast',
-      '-tune', 'zerolatency',
-      '-pix_fmt', 'yuv420p',
-      '-b:v', preset.videoBitrate,
-      '-maxrate', preset.videoBitrate,
-      '-bufsize', preset.videoBitrate,
-      '-g', String(preset.fps * 2),
-      // ---- audio encode ----
+      '-fflags', '+genpts',
+      '-i', 'pipe:0', // fragmented WebM from MediaRecorder
+      ...videoArgs,
+      // RTMP requires AAC audio; MediaRecorder gives us Opus, so always encode.
       '-c:a', 'aac',
       '-b:a', preset.audioBitrate,
       '-ar', '48000',
-      // ---- fan-out ----
       '-f', 'tee',
-      '-map', '0:v',
-      '-map', '1:a',
+      '-map', '0:v:0',
+      '-map', '0:a:0?',
       teeOutput
     ]
 
-    // fd 3 added only when feeding mic PCM.
-    const stdio = withMic ? ['pipe', 'pipe', 'pipe', 'pipe'] : ['pipe', 'pipe', 'pipe']
-    this.proc = spawn(FFMPEG_PATH, args, { stdio })
-
+    this.proc = spawn(FFMPEG_PATH, args, { stdio: ['pipe', 'pipe', 'pipe'] })
+    // Swallow EPIPE: when FFmpeg exits, in-flight chunk writes would otherwise
+    // throw an uncaught exception and crash the main process.
+    this.proc.stdin.on('error', () => {})
     this.proc.stderr.on('data', (chunk) => this._parseStats(chunk.toString()))
     this.proc.on('error', (err) => this.emit('status', { state: 'error', message: err.message }))
     this.proc.on('close', (code) => this._onClose(code))
   }
 
-  /** Handle process exit: clean stop vs. unexpected drop (auto-reconnect). */
   _onClose(code) {
     this.proc = null
+    this.live = false
     if (this.userStopped) {
-      this.live = false
       this.emit('status', { state: 'stopped', code })
-      return
-    }
-    // Unexpected exit while we believe we're live → attempt to reconnect.
-    if (this.reconnects < this.maxReconnects) {
-      this.reconnects += 1
-      const delay = Math.min(1000 * 2 ** (this.reconnects - 1), 8000)
-      this.emit('status', { state: 'reconnecting', attempt: this.reconnects, delay })
-      setTimeout(() => {
-        if (this.userStopped) return
-        this._spawn()
-        this.emit('status', { state: 'reconnected', attempt: this.reconnects })
-      }, delay)
     } else {
-      this.live = false
-      this.emit('status', { state: 'failed', message: 'Stream dropped and could not reconnect.' })
+      this.emit('status', {
+        state: 'failed',
+        code,
+        message: 'The stream stopped unexpectedly. Check your connection and stream keys, then go live again.'
+      })
     }
   }
 
-  pushFrame(buffer) {
-    if (this.live && this.proc?.stdin.writable) {
-      this.proc.stdin.write(Buffer.from(buffer))
-    }
-  }
-
-  /** Feed interleaved s16le stereo mic samples (fd 3). */
-  pushAudio(buffer) {
-    const audioPipe = this.proc?.stdio?.[3]
-    if (this.live && audioPipe?.writable) {
-      audioPipe.write(Buffer.from(buffer))
+  /** Write a WebM chunk from the renderer's MediaRecorder to FFmpeg's stdin. */
+  pushChunk(buffer) {
+    const stdin = this.proc?.stdin
+    if (this.live && stdin && stdin.writable) {
+      try {
+        stdin.write(Buffer.from(buffer))
+      } catch {
+        /* EPIPE on shutdown — ignore */
+      }
     }
   }
 

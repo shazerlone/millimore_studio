@@ -206,8 +206,7 @@ ipcMain.handle('stream:stop', () => {
   overlay.disconnectRelay()
   return engine.stop()
 })
-ipcMain.on('stream:frame', (_e, buffer) => engine.pushFrame(buffer))
-ipcMain.on('stream:audio', (_e, buffer) => engine.pushAudio(buffer))
+ipcMain.on('stream:chunk', (_e, buffer) => engine.pushChunk(buffer))
 ipcMain.handle('stream:testSpeed', () => testConnectionSpeed())
 
 // ---- IPC: MT5 ----------------------------------------------------------

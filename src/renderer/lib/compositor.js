@@ -1,16 +1,39 @@
 import { QUALITY_DIMS } from './quality'
 import { paintOverlay } from './overlayPainter'
 
+const BITRATES = { '720p30': 2_500_000, '1080p30': 4_500_000, '1080p60': 6_000_000 }
+
+// Preferred MediaRecorder formats. H.264 lets FFmpeg stream-copy (lowest CPU /
+// latency); VP9/VP8 fall back to a light transcode.
+const MIME_PREFS = [
+  'video/webm;codecs=h264,opus',
+  'video/webm;codecs=h264',
+  'video/x-matroska;codecs=avc1,opus',
+  'video/webm;codecs=vp9,opus',
+  'video/webm;codecs=vp8,opus',
+  'video/webm'
+]
+
+function pickMime() {
+  if (typeof MediaRecorder === 'undefined') return ''
+  for (const m of MIME_PREFS) {
+    try {
+      if (MediaRecorder.isTypeSupported(m)) return m
+    } catch {
+      /* ignore */
+    }
+  }
+  return ''
+}
+
 /**
- * StreamCompositor draws the screen capture and camera into a single canvas
- * (picture-in-picture), plus any active trade-card overlay, then ships raw RGBA
- * frames to the main process where FFmpeg encodes and fans them out to every
- * RTMP destination.
+ * StreamCompositor draws the screen capture, camera (picture-in-picture) and the
+ * Millimore overlay into a single canvas, captures that canvas as a MediaStream,
+ * and uses MediaRecorder to hardware-encode it to a compressed WebM stream. The
+ * compressed chunks are shipped to the main process for FFmpeg to remux to RTMP.
  *
- * The trade overlay is rendered by React in the preview; for the encoded output
- * we draw an offscreen DOM node onto the canvas via an Image snapshot. To keep
- * this dependency-free, overlay drawing is delegated through `drawOverlay`,
- * which the caller can supply.
+ * This compresses in the renderer instead of shipping raw frames over IPC, which
+ * is the difference between a smooth low-latency stream and a stuttering one.
  */
 export class StreamCompositor {
   constructor({ quality = '1080p30', getOverlay = null } = {}) {
@@ -18,8 +41,7 @@ export class StreamCompositor {
     this.width = dims.width
     this.height = dims.height
     this.fps = dims.fps
-    // Returns the current overlay state ({ config, trade }) each frame so the
-    // painter reflects live changes without restarting the compositor.
+    this.bitrate = BITRATES[quality] || 4_500_000
     this.getOverlay = getOverlay
 
     this.canvas = document.createElement('canvas')
@@ -32,15 +54,20 @@ export class StreamCompositor {
     this.screenVideo.muted = this.cameraVideo.muted = true
 
     this._raf = null
-    this._interval = null
     this._running = false
+    this.recorder = null
+    this._videoCopy = false
   }
 
   /**
-   * @param {string} screenSourceId  Electron desktopCapturer source id
-   * @param {MediaStream} cameraStream  optional getUserMedia camera stream
+   * Acquire the screen, wire up the canvas capture + recorder, and report whether
+   * the chosen codec lets FFmpeg stream-copy. Call beginRecording() once the
+   * FFmpeg engine is ready to receive chunks.
+   *
+   * @param {string} screenSourceId Electron desktopCapturer source id
+   * @param {MediaStream} cameraStream camera + mic stream (audio is muxed in)
    */
-  async start(screenSourceId, cameraStream) {
+  async prepare(screenSourceId, cameraStream) {
     this.screenStream = await navigator.mediaDevices.getUserMedia({
       audio: false,
       video: {
@@ -58,11 +85,37 @@ export class StreamCompositor {
 
     if (cameraStream) {
       this.cameraVideo.srcObject = cameraStream
-      await this.cameraVideo.play()
+      await this.cameraVideo.play().catch(() => {})
     }
 
     this._running = true
     this._loop()
+
+    // Build the output stream: composited canvas video + the mic audio track.
+    this.outStream = this.canvas.captureStream(this.fps)
+    const micTrack = cameraStream?.getAudioTracks?.()[0]
+    if (micTrack) this.outStream.addTrack(micTrack)
+
+    const mime = pickMime()
+    this._videoCopy = mime.includes('h264') || mime.includes('avc1')
+    this.recorder = new MediaRecorder(this.outStream, {
+      mimeType: mime || undefined,
+      videoBitsPerSecond: this.bitrate,
+      audioBitsPerSecond: 160_000
+    })
+    this.recorder.ondataavailable = (e) => {
+      if (e.data && e.data.size > 0) {
+        e.data.arrayBuffer().then((buf) => window.millimore?.stream.pushChunk(buf))
+      }
+    }
+    return { videoCopy: this._videoCopy, mime }
+  }
+
+  /** Start emitting chunks (call after the engine is listening). */
+  beginRecording(timesliceMs = 250) {
+    if (this.recorder && this.recorder.state === 'inactive') {
+      this.recorder.start(timesliceMs)
+    }
   }
 
   _loop() {
@@ -74,7 +127,6 @@ export class StreamCompositor {
       if (t - last < frameMs) return
       last = t
       this._drawFrame()
-      this._emitFrame()
     }
     this._raf = requestAnimationFrame(render)
   }
@@ -84,12 +136,10 @@ export class StreamCompositor {
     ctx.fillStyle = '#0B1220'
     ctx.fillRect(0, 0, width, height)
 
-    // base layer: full-bleed screen capture
     if (this.screenVideo.readyState >= 2) {
       ctx.drawImage(this.screenVideo, 0, 0, width, height)
     }
 
-    // PiP: camera bottom-right
     if (this.cameraVideo.readyState >= 2) {
       const camW = Math.round(width * 0.26)
       const camH = Math.round(camW * 0.75)
@@ -106,27 +156,27 @@ export class StreamCompositor {
       ctx.stroke()
     }
 
-    // Millimore overlay: ticker + watermark + branded trade card.
     if (this.getOverlay) {
       try {
         paintOverlay(ctx, width, height, this.getOverlay(), performance.now())
       } catch (err) {
-        // Never let an overlay paint error break the broadcast.
         console.error('Overlay paint error:', err)
       }
     }
   }
 
-  _emitFrame() {
-    const img = this.ctx.getImageData(0, 0, this.width, this.height)
-    // Transfer the underlying buffer to the main process for FFmpeg's stdin.
-    window.millimore?.stream.pushFrame(img.data.buffer)
-  }
-
   stop() {
     this._running = false
     if (this._raf) cancelAnimationFrame(this._raf)
+    try {
+      if (this.recorder && this.recorder.state !== 'inactive') this.recorder.stop()
+    } catch {
+      /* already stopped */
+    }
+    // Stop the screen capture and the composited video track, but leave the mic
+    // track alone — it's owned by the caller's camera stream.
     this.screenStream?.getTracks().forEach((t) => t.stop())
+    this.outStream?.getVideoTracks().forEach((t) => t.stop())
     this.screenVideo.srcObject = null
     this.cameraVideo.srcObject = null
   }
