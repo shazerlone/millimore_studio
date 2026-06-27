@@ -3,13 +3,14 @@ import { colors, radius } from '@theme/colors'
 import { typography } from '@theme/typography'
 import { Page, PageHeader } from '@components/Page'
 import { StreamPreview } from '@components/StreamPreview'
-import { Card, Field, Input, Toggle, Badge, Button, Spinner } from '@components/ui'
-import { LiveIcon, LockIcon, SignalIcon, LayersIcon, CheckIcon, VideoIcon, InfoIcon } from '@components/Icons'
+import { Card, Field, Input, Select, Toggle, Badge, Button, Spinner } from '@components/ui'
+import { LiveIcon, LockIcon, SignalIcon, LayersIcon, CheckIcon, VideoIcon, MicIcon, InfoIcon } from '@components/Icons'
 import { ScreenSourcePicker } from '@components/ScreenSourcePicker'
 import { StreamKeyGuide, STREAM_KEY_GUIDES } from '@components/StreamKeyGuide'
 import { destinations as DESTS, qualityOptions, sampleTrade } from '../data/mock'
 import { formatElapsed } from '../lib/quality'
 import { StreamCompositor } from '../lib/compositor'
+import { AudioStreamer } from '../lib/audioCapture'
 import { useApp } from '../store'
 
 export function GoLive() {
@@ -32,6 +33,14 @@ export function GoLive() {
   const [perms, setPerms] = useState(null)
   const [captureError, setCaptureError] = useState(null)
 
+  // devices
+  const [devices, setDevices] = useState({ cams: [], mics: [] })
+  const [camId, setCamId] = useState('')
+  const [micId, setMicId] = useState('')
+
+  // connection health
+  const [health, setHealth] = useState(null) // { state, ... }
+
   // modals
   const [showPicker, setShowPicker] = useState(false)
   const [guidePlatform, setGuidePlatform] = useState(null)
@@ -41,6 +50,7 @@ export function GoLive() {
   const cameraStream = useRef(null)
   const screenStream = useRef(null)
   const compositor = useRef(null)
+  const audioStreamer = useRef(null)
   const timerRef = useRef(null)
   const startedAt = useRef(null)
 
@@ -59,14 +69,15 @@ export function GoLive() {
           const p = await bridge.capture.permissions()
           if (!cancelled) setPerms(p)
         }
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { width: { ideal: 1280 }, height: { ideal: 720 } },
-          audio: true
-        })
-        if (cancelled) return stream.getTracks().forEach((t) => t.stop())
-        cameraStream.current = stream
-        if (cameraRef.current) cameraRef.current.srcObject = stream
-        setHasCamera(true)
+        await acquireCamera()
+        // Enumerate devices (labels appear only after permission is granted).
+        const list = await navigator.mediaDevices.enumerateDevices()
+        if (!cancelled) {
+          setDevices({
+            cams: list.filter((d) => d.kind === 'videoinput'),
+            mics: list.filter((d) => d.kind === 'audioinput')
+          })
+        }
       } catch (err) {
         if (!cancelled) setCaptureError('camera')
         console.error('Camera error:', err)
@@ -77,6 +88,54 @@ export function GoLive() {
       cancelled = true
       cameraStream.current?.getTracks().forEach((t) => t.stop())
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bridge])
+
+  // (Re)acquire the camera + mic using the currently selected devices.
+  const acquireCamera = async () => {
+    cameraStream.current?.getTracks().forEach((t) => t.stop())
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        deviceId: camId ? { exact: camId } : undefined,
+        width: { ideal: 1280 },
+        height: { ideal: 720 }
+      },
+      audio: micId ? { deviceId: { exact: micId } } : true
+    })
+    cameraStream.current = stream
+    if (cameraRef.current) cameraRef.current.srcObject = stream
+    setHasCamera(true)
+    return stream
+  }
+
+  // Apply a device change live (also restarts mic capture if streaming).
+  const changeDevice = async (kind, id) => {
+    if (kind === 'cam') setCamId(id)
+    else setMicId(id)
+    // Defer so state is set before re-acquire reads it.
+    setTimeout(async () => {
+      try {
+        const stream = await acquireCamera()
+        if (isLive && kind === 'mic') {
+          audioStreamer.current?.stop()
+          audioStreamer.current = new AudioStreamer()
+          audioStreamer.current.start(stream)
+        }
+      } catch (err) {
+        console.error('Device switch failed:', err)
+      }
+    }, 0)
+  }
+
+  // Watch stream health (reconnects / unstable upload) and auto-downgrade once.
+  useEffect(() => {
+    if (!bridge) return
+    return bridge.stream.onStatus((s) => {
+      setHealth(s)
+      if (s.state === 'unstable' && s.recommend) {
+        setQuality(s.recommend)
+      }
+    })
   }, [bridge])
 
   // Subscribe to live trade events to drive the overlay preview.
@@ -144,9 +203,16 @@ export function GoLive() {
       platform: d.platform,
       key: keys[d.platform] || ''
     }))
+    const micOn = !!cameraStream.current?.getAudioTracks?.().length
     try {
       if (bridge) {
-        await bridge.stream.start({ quality, destinations: dests, title, overlayRelayKey: keys.millimore || 'demo' })
+        await bridge.stream.start({
+          quality,
+          destinations: dests,
+          title,
+          audio: micOn,
+          overlayRelayKey: keys.millimore || 'demo'
+        })
         // Composite the chosen screen + camera and feed FFmpeg.
         let sourceId = screenSource?.id
         if (!sourceId) {
@@ -156,6 +222,11 @@ export function GoLive() {
         if (sourceId) {
           compositor.current = new StreamCompositor({ quality })
           await compositor.current.start(sourceId, cameraStream.current)
+        }
+        // Pipe microphone audio into the encode.
+        if (micOn) {
+          audioStreamer.current = new AudioStreamer()
+          audioStreamer.current.start(cameraStream.current)
         }
       }
       setIsLive(true)
@@ -172,10 +243,13 @@ export function GoLive() {
   const stopStream = async () => {
     compositor.current?.stop()
     compositor.current = null
+    audioStreamer.current?.stop()
+    audioStreamer.current = null
     await bridge?.stream.stop()
     clearInterval(timerRef.current)
     setElapsed('00:00:00')
     setOverlayTrade(null)
+    setHealth(null)
     setIsLive(false)
   }
 
@@ -202,6 +276,9 @@ export function GoLive() {
       <div style={{ display: 'grid', gridTemplateColumns: '60% 40%', gap: 20, alignItems: 'start' }}>
         {/* LEFT — preview */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          {health && ['reconnecting', 'unstable', 'failed', 'reconnected'].includes(health.state) && (
+            <HealthBanner health={health} />
+          )}
           <StreamPreview
             live={isLive}
             elapsed={elapsed}
@@ -233,6 +310,32 @@ export function GoLive() {
               <Badge tone={hasCamera ? 'green' : 'amber'}>
                 <VideoIcon size={12} /> {hasCamera ? 'Camera on' : 'Camera off'}
               </Badge>
+            </div>
+
+            {/* device selection — applies live */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 12 }}>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+                <span style={{ ...typography.caption, color: colors.textSecondary, display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                  <VideoIcon size={13} /> Camera
+                </span>
+                <Select value={camId} onChange={(e) => changeDevice('cam', e.target.value)} style={{ fontSize: 13, padding: '8px 10px' }}>
+                  <option value="">Default camera</option>
+                  {devices.cams.map((d) => (
+                    <option key={d.deviceId} value={d.deviceId}>{d.label || 'Camera'}</option>
+                  ))}
+                </Select>
+              </label>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+                <span style={{ ...typography.caption, color: colors.textSecondary, display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                  <MicIcon size={13} /> Microphone
+                </span>
+                <Select value={micId} onChange={(e) => changeDevice('mic', e.target.value)} style={{ fontSize: 13, padding: '8px 10px' }}>
+                  <option value="">Default microphone</option>
+                  {devices.mics.map((d) => (
+                    <option key={d.deviceId} value={d.deviceId}>{d.label || 'Microphone'}</option>
+                  ))}
+                </Select>
+              </label>
             </div>
 
             {(captureError || screenDenied) && (
@@ -367,6 +470,45 @@ export function GoLive() {
 
 function SubLabel({ children }) {
   return <div style={{ ...typography.label, color: colors.textSecondary, marginBottom: 10 }}>{children}</div>
+}
+
+function HealthBanner({ health }) {
+  const map = {
+    reconnecting: {
+      tone: colors.warning,
+      bg: colors.warningSoft,
+      text: `Connection dropped — reconnecting (attempt ${health.attempt})…`
+    },
+    reconnected: { tone: colors.success, bg: colors.successSoft, text: 'Reconnected — you’re live again.' },
+    unstable: {
+      tone: colors.warning,
+      bg: colors.warningSoft,
+      text: health.recommend
+        ? `Upload is unstable (${health.measuredKbps} kbps). Lowering quality to ${health.recommend}.`
+        : 'Upload is unstable — your stream may buffer.'
+    },
+    failed: { tone: colors.live, bg: colors.liveSoft, text: health.message || 'Stream failed to reconnect.' }
+  }
+  const m = map[health.state]
+  if (!m) return null
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        padding: '10px 14px',
+        borderRadius: radius.button,
+        background: m.bg,
+        color: m.tone,
+        ...typography.bodyStrong,
+        fontSize: 13
+      }}
+    >
+      <InfoIcon size={16} />
+      {m.text}
+    </div>
+  )
 }
 
 function DestinationRow({ dest, on, onToggle, keyValue, onKey, onGuide, hasGuide, disabled }) {

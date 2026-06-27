@@ -155,6 +155,7 @@ ipcMain.handle('stream:stop', () => {
   return engine.stop()
 })
 ipcMain.on('stream:frame', (_e, buffer) => engine.pushFrame(buffer))
+ipcMain.on('stream:audio', (_e, buffer) => engine.pushAudio(buffer))
 ipcMain.handle('stream:testSpeed', () => testConnectionSpeed())
 
 // ---- IPC: MT5 ----------------------------------------------------------

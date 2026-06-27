@@ -38,6 +38,11 @@ export class MultistreamEngine extends EventEmitter {
     this.proc = null
     this.live = false
     this.startedAt = null
+    this.config = null
+    this.userStopped = false
+    this.reconnects = 0
+    this.maxReconnects = 6
+    this._stability = { lowSince: null }
   }
 
   get isLive() {
@@ -46,30 +51,52 @@ export class MultistreamEngine extends EventEmitter {
 
   /**
    * @param {object} config
-   * @param {string} config.quality   key of QUALITY_PRESETS
+   * @param {string} config.quality      key of QUALITY_PRESETS
    * @param {Array<{platform:string, key:string}>} config.destinations
+   * @param {boolean} [config.audio]     true if the renderer will feed mic PCM
    */
   start(config) {
     if (this.live) throw new Error('Stream already running')
-
-    const preset = QUALITY_PRESETS[config.quality] || QUALITY_PRESETS['1080p30']
     const targets = this._buildTargets(config.destinations)
     if (targets.length === 0) throw new Error('No valid stream destinations')
 
-    const teeOutput = targets
-      .map((url) => `[f=flv:onfail=ignore]${url}`)
-      .join('|')
+    this.config = config
+    this.userStopped = false
+    this.reconnects = 0
+    this._stability = { lowSince: null }
+
+    this._spawn()
+
+    this.live = true
+    this.startedAt = Date.now()
+    this.emit('status', {
+      state: 'live',
+      destinations: targets.length,
+      quality: config.quality
+    })
+    return { ok: true, destinations: targets.length }
+  }
+
+  /** Build the FFmpeg arg list for the current config and spawn the process. */
+  _spawn() {
+    const config = this.config
+    const preset = QUALITY_PRESETS[config.quality] || QUALITY_PRESETS['1080p30']
+    const targets = this._buildTargets(config.destinations)
+    const teeOutput = targets.map((url) => `[f=flv:onfail=ignore]${url}`).join('|')
+    const withMic = !!config.audio
+
+    const audioInput = withMic
+      ? ['-f', 's16le', '-ar', '48000', '-ac', '2', '-i', 'pipe:3'] // mic PCM on fd 3
+      : ['-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000']
 
     const args = [
-      // ---- raw RGBA video coming from the renderer canvas over stdin ----
+      // ---- raw RGBA video from the renderer canvas over stdin ----
       '-f', 'rawvideo',
       '-pix_fmt', 'rgba',
       '-s', `${preset.width}x${preset.height}`,
       '-r', String(preset.fps),
       '-i', 'pipe:0',
-      // ---- audio (silent placeholder until a real mic source is wired) ----
-      '-f', 'lavfi',
-      '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100',
+      ...audioInput,
       // ---- video encode (single encode, fanned out by tee) ----
       '-c:v', 'libx264',
       '-preset', 'veryfast',
@@ -82,7 +109,7 @@ export class MultistreamEngine extends EventEmitter {
       // ---- audio encode ----
       '-c:a', 'aac',
       '-b:a', preset.audioBitrate,
-      '-ar', '44100',
+      '-ar', '48000',
       // ---- fan-out ----
       '-f', 'tee',
       '-map', '0:v',
@@ -90,37 +117,59 @@ export class MultistreamEngine extends EventEmitter {
       teeOutput
     ]
 
-    this.proc = spawn(FFMPEG_PATH, args, { stdio: ['pipe', 'pipe', 'pipe'] })
-    this.live = true
-    this.startedAt = Date.now()
+    // fd 3 added only when feeding mic PCM.
+    const stdio = withMic ? ['pipe', 'pipe', 'pipe', 'pipe'] : ['pipe', 'pipe', 'pipe']
+    this.proc = spawn(FFMPEG_PATH, args, { stdio })
 
     this.proc.stderr.on('data', (chunk) => this._parseStats(chunk.toString()))
-    this.proc.on('error', (err) => {
-      this.live = false
-      this.emit('status', { state: 'error', message: err.message })
-    })
-    this.proc.on('close', (code) => {
-      this.live = false
-      this.proc = null
-      this.emit('status', { state: 'stopped', code })
-    })
+    this.proc.on('error', (err) => this.emit('status', { state: 'error', message: err.message }))
+    this.proc.on('close', (code) => this._onClose(code))
+  }
 
-    this.emit('status', {
-      state: 'live',
-      destinations: targets.length,
-      quality: config.quality
-    })
-    return { ok: true, destinations: targets.length }
+  /** Handle process exit: clean stop vs. unexpected drop (auto-reconnect). */
+  _onClose(code) {
+    this.proc = null
+    if (this.userStopped) {
+      this.live = false
+      this.emit('status', { state: 'stopped', code })
+      return
+    }
+    // Unexpected exit while we believe we're live → attempt to reconnect.
+    if (this.reconnects < this.maxReconnects) {
+      this.reconnects += 1
+      const delay = Math.min(1000 * 2 ** (this.reconnects - 1), 8000)
+      this.emit('status', { state: 'reconnecting', attempt: this.reconnects, delay })
+      setTimeout(() => {
+        if (this.userStopped) return
+        this._spawn()
+        this.emit('status', { state: 'reconnected', attempt: this.reconnects })
+      }, delay)
+    } else {
+      this.live = false
+      this.emit('status', { state: 'failed', message: 'Stream dropped and could not reconnect.' })
+    }
   }
 
   pushFrame(buffer) {
     if (this.live && this.proc?.stdin.writable) {
-      this.proc.stdin.write(buffer)
+      this.proc.stdin.write(Buffer.from(buffer))
+    }
+  }
+
+  /** Feed interleaved s16le stereo mic samples (fd 3). */
+  pushAudio(buffer) {
+    const audioPipe = this.proc?.stdio?.[3]
+    if (this.live && audioPipe?.writable) {
+      audioPipe.write(Buffer.from(buffer))
     }
   }
 
   stop() {
-    if (!this.proc) return { ok: true }
+    this.userStopped = true
+    if (!this.proc) {
+      this.live = false
+      return { ok: true }
+    }
     try {
       this.proc.stdin.end()
     } catch {
@@ -150,13 +199,46 @@ export class MultistreamEngine extends EventEmitter {
     const frame = line.match(/frame=\s*(\d+)/)
     const dropped = line.match(/drop=\s*(\d+)/)
     if (fps || bitrate) {
+      const bitrateKbps = bitrate ? Number(bitrate[1]) : null
       this.emit('stats', {
         fps: fps ? Number(fps[1]) : null,
-        bitrateKbps: bitrate ? Number(bitrate[1]) : null,
+        bitrateKbps,
         frames: frame ? Number(frame[1]) : null,
         dropped: dropped ? Number(dropped[1]) : 0,
         uptimeMs: this.startedAt ? Date.now() - this.startedAt : 0
       })
+      this._checkStability(bitrateKbps)
+    }
+  }
+
+  /**
+   * Watch the live bitrate against the target. If it stays well below target
+   * for a sustained window the upload is struggling — recommend the next lower
+   * quality preset so the renderer/UI can offer (or auto-apply) a downgrade.
+   */
+  _checkStability(bitrateKbps) {
+    if (!bitrateKbps || !this.config) return
+    const preset = QUALITY_PRESETS[this.config.quality] || QUALITY_PRESETS['1080p30']
+    const targetKbps = parseInt(preset.videoBitrate, 10)
+    const struggling = bitrateKbps < targetKbps * 0.6
+
+    if (struggling) {
+      if (!this._stability.lowSince) this._stability.lowSince = Date.now()
+      // Sustained for 8s → recommend a downgrade.
+      if (Date.now() - this._stability.lowSince > 8000) {
+        const order = ['1080p60', '1080p30', '720p30']
+        const idx = order.indexOf(this.config.quality)
+        const downgrade = idx >= 0 && idx < order.length - 1 ? order[idx + 1] : null
+        this.emit('status', {
+          state: 'unstable',
+          measuredKbps: Math.round(bitrateKbps),
+          targetKbps,
+          recommend: downgrade
+        })
+        this._stability.lowSince = Date.now() // throttle repeat warnings
+      }
+    } else {
+      this._stability.lowSince = null
     }
   }
 }

@@ -46,8 +46,10 @@
     "asarUnpack": [
       "**/node_modules/ffmpeg-static/**"
     ],
+    "icon": "build/icon.png",
     "mac": {
       "category": "public.app-category.video",
+      "icon": "build/icon.png",
       "target": [
         "dmg",
         "zip"
@@ -59,6 +61,7 @@
       }
     },
     "win": {
+      "icon": "build/icon.png",
       "target": "nsis"
     }
   }

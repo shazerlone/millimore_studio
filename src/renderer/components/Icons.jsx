@@ -181,3 +181,37 @@ export const SignalIcon = (p) => (
     <path d="M4 20v-4M9 20v-8M14 20v-12M19 20V5" />
   </Svg>
 )
+
+export const ArrowUpRightIcon = (p) => (
+  <Svg {...p}>
+    <path d="M7 17 17 7" />
+    <path d="M8 7h9v9" />
+  </Svg>
+)
+
+export const ArrowDownRightIcon = (p) => (
+  <Svg {...p}>
+    <path d="M7 7l10 10" />
+    <path d="M17 8v9H8" />
+  </Svg>
+)
+
+export const TargetIcon = (p) => (
+  <Svg {...p}>
+    <circle cx="12" cy="12" r="9" />
+    <circle cx="12" cy="12" r="5" />
+    <circle cx="12" cy="12" r="1.4" />
+  </Svg>
+)
+
+export const ShieldIcon = (p) => (
+  <Svg {...p}>
+    <path d="M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6l7-3Z" />
+  </Svg>
+)
+
+export const BoltIcon = (p) => (
+  <Svg {...p}>
+    <path d="M13 2 4 14h7l-1 8 9-12h-7l1-8Z" />
+  </Svg>
+)
