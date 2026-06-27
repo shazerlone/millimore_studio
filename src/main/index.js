@@ -7,8 +7,19 @@ import {
   safeStorage,
   session,
   systemPreferences,
+  powerSaveBlocker,
   shell
 } from 'electron'
+
+// Keep the renderer running at full speed even when the trader switches to
+// MT5/Chrome. Without these, Chromium throttles timers, requestAnimationFrame
+// and MediaRecorder when the window is unfocused/occluded — which starves the
+// canvas capture and makes YouTube report "No data" the moment you switch apps.
+app.commandLine.appendSwitch('disable-background-timer-throttling')
+app.commandLine.appendSwitch('disable-renderer-backgrounding')
+app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
+
+let powerBlockerId = null
 import Store from 'electron-store'
 import { MultistreamEngine, testConnectionSpeed } from './ffmpeg.js'
 import { MT5Manager } from './mt5.js'
@@ -36,7 +47,9 @@ function createWindow() {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false
+      sandbox: false,
+      // Critical for streaming: don't throttle this window in the background.
+      backgroundThrottling: false
     }
   })
 
@@ -200,10 +213,19 @@ ipcMain.handle('app:moveToApplications', () => {
 
 ipcMain.handle('stream:start', (_e, config) => {
   if (config?.overlayRelayKey) overlay.connectRelay(config.overlayRelayKey)
-  return engine.start(config)
+  const result = engine.start(config)
+  // Prevent display/app sleep while live.
+  if (powerBlockerId === null || !powerSaveBlocker.isStarted(powerBlockerId)) {
+    powerBlockerId = powerSaveBlocker.start('prevent-display-sleep')
+  }
+  return result
 })
 ipcMain.handle('stream:stop', () => {
   overlay.disconnectRelay()
+  if (powerBlockerId !== null && powerSaveBlocker.isStarted(powerBlockerId)) {
+    powerSaveBlocker.stop(powerBlockerId)
+    powerBlockerId = null
+  }
   return engine.stop()
 })
 ipcMain.on('stream:chunk', (_e, buffer) => engine.pushChunk(buffer))

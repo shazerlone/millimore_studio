@@ -53,7 +53,7 @@ export class StreamCompositor {
     this.cameraVideo = document.createElement('video')
     this.screenVideo.muted = this.cameraVideo.muted = true
 
-    this._raf = null
+    this._timer = null
     this._running = false
     this.recorder = null
     this._videoCopy = false
@@ -119,16 +119,13 @@ export class StreamCompositor {
   }
 
   _loop() {
+    // A timer (not requestAnimationFrame) keeps painting at full rate even when
+    // the window is in the background — rAF pauses when the page is occluded,
+    // which would freeze the broadcast the moment the trader switches apps.
     const frameMs = 1000 / this.fps
-    let last = 0
-    const render = (t) => {
-      if (!this._running) return
-      this._raf = requestAnimationFrame(render)
-      if (t - last < frameMs) return
-      last = t
-      this._drawFrame()
-    }
-    this._raf = requestAnimationFrame(render)
+    this._timer = setInterval(() => {
+      if (this._running) this._drawFrame()
+    }, frameMs)
   }
 
   _drawFrame() {
@@ -167,7 +164,7 @@ export class StreamCompositor {
 
   stop() {
     this._running = false
-    if (this._raf) cancelAnimationFrame(this._raf)
+    if (this._timer) clearInterval(this._timer)
     try {
       if (this.recorder && this.recorder.state !== 'inactive') this.recorder.stop()
     } catch {
