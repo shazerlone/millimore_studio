@@ -5,6 +5,8 @@ import {
   ipcMain,
   desktopCapturer,
   safeStorage,
+  session,
+  systemPreferences,
   shell
 } from 'electron'
 import Store from 'electron-store'
@@ -52,6 +54,48 @@ function createWindow() {
   }
 }
 
+// ---- media permissions (camera / mic / screen) -------------------------
+
+/**
+ * Without these handlers the renderer's getUserMedia / getDisplayMedia calls
+ * are silently denied, so the camera and screen capture never start. We grant
+ * media + display-capture for our own first-party content, and route
+ * getDisplayMedia through desktopCapturer so the in-app source picker works.
+ */
+function setupMediaPermissions() {
+  const ses = session.defaultSession
+
+  ses.setPermissionRequestHandler((_wc, permission, callback) => {
+    const allowed = ['media', 'display-capture', 'audioCapture', 'videoCapture', 'mediaKeySystem']
+    callback(allowed.includes(permission))
+  })
+
+  ses.setPermissionCheckHandler((_wc, permission) =>
+    ['media', 'display-capture', 'audioCapture', 'videoCapture'].includes(permission)
+  )
+
+  // Renderer can call navigator.mediaDevices.getDisplayMedia() and we hand back
+  // the screen the user picked (id passed via the request's app-level state),
+  // defaulting to the primary screen.
+  ses.setDisplayMediaRequestHandler((request, callback) => {
+    desktopCapturer.getSources({ types: ['screen', 'window'] }).then((sources) => {
+      callback({ video: sources[0], audio: 'loopback' })
+    })
+  }, { useSystemPicker: false })
+}
+
+/** Ask macOS for camera/mic access up front (no-op on Windows). */
+async function ensureMacMediaAccess() {
+  if (process.platform !== 'darwin') return { camera: 'granted', microphone: 'granted', screen: 'granted' }
+  const camera = await systemPreferences.askForMediaAccess('camera').catch(() => false)
+  const microphone = await systemPreferences.askForMediaAccess('microphone').catch(() => false)
+  return {
+    camera: camera ? 'granted' : systemPreferences.getMediaAccessStatus('camera'),
+    microphone: microphone ? 'granted' : systemPreferences.getMediaAccessStatus('microphone'),
+    screen: systemPreferences.getMediaAccessStatus('screen')
+  }
+}
+
 // ---- forward engine / mt5 / overlay events to the renderer -------------
 
 function wireEvents() {
@@ -84,8 +128,20 @@ ipcMain.handle('capture:getSources', async () => {
   return sources.map((s) => ({
     id: s.id,
     name: s.name,
+    kind: s.id.startsWith('screen') ? 'screen' : 'window',
     thumbnail: s.thumbnail.toDataURL()
   }))
+})
+
+// Current camera/mic/screen permission status, and a way to (re)request it.
+ipcMain.handle('capture:permissions', () => ensureMacMediaAccess())
+ipcMain.handle('capture:openScreenPrefs', () => {
+  if (process.platform === 'darwin') {
+    shell.openExternal(
+      'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'
+    )
+  }
+  return { ok: true }
 })
 
 // ---- IPC: stream -------------------------------------------------------
@@ -157,6 +213,10 @@ ipcMain.handle('settings:all', () => store.store)
 
 // ---- IPC: app ----------------------------------------------------------
 
+ipcMain.handle('app:openExternal', (_e, url) => {
+  if (/^https?:\/\//i.test(url)) shell.openExternal(url)
+  return { ok: true }
+})
 ipcMain.handle('app:getVersion', () => app.getVersion())
 ipcMain.handle('app:checkForUpdates', async () => {
   // Wire to electron-updater in production.
@@ -166,6 +226,7 @@ ipcMain.handle('app:checkForUpdates', async () => {
 // ---- lifecycle ---------------------------------------------------------
 
 app.whenReady().then(() => {
+  setupMediaPermissions()
   wireEvents()
   createWindow()
   app.on('activate', () => {

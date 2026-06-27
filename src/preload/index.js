@@ -6,8 +6,14 @@ import { contextBridge, ipcRenderer } from 'electron'
  * this allow-listed surface.
  */
 const api = {
-  // ---- Capture sources ----
+  // ---- Capture sources & media permissions ----
   getScreenSources: () => ipcRenderer.invoke('capture:getSources'),
+  capture: {
+    getSources: () => ipcRenderer.invoke('capture:getSources'),
+    permissions: () => ipcRenderer.invoke('capture:permissions'),
+    openScreenPrefs: () => ipcRenderer.invoke('capture:openScreenPrefs')
+  },
+  openExternal: (url) => ipcRenderer.invoke('app:openExternal', url),
 
   // ---- Multistream engine (FFmpeg) ----
   stream: {

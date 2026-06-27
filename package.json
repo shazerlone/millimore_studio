@@ -51,7 +51,12 @@
       "target": [
         "dmg",
         "zip"
-      ]
+      ],
+      "extendInfo": {
+        "NSCameraUsageDescription": "Millimore Desktop uses your camera for your live stream's picture-in-picture webcam.",
+        "NSMicrophoneUsageDescription": "Millimore Desktop uses your microphone for your live stream audio.",
+        "NSScreenCaptureUsageDescription": "Millimore Desktop captures your screen to broadcast it on your live stream."
+      }
     },
     "win": {
       "target": "nsis"

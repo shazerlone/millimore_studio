@@ -21,7 +21,10 @@ export function StreamPreview({
   elapsed = '00:00:00',
   overlayTrade = null,
   overlayConfig = {},
-  cameraRef = null
+  cameraRef = null,
+  screenRef = null,
+  hasScreen = false,
+  hasCamera = true
 }) {
   const {
     position = 'bottom-left',
@@ -50,7 +53,23 @@ export function StreamPreview({
         border: `1px solid ${colors.borderStrong}`
       }}
     >
-      <MockDesktop />
+      {/* base layer: real screen capture if selected, otherwise mock desktop */}
+      <video
+        ref={screenRef}
+        autoPlay
+        muted
+        playsInline
+        style={{
+          position: 'absolute',
+          inset: 0,
+          width: '100%',
+          height: '100%',
+          objectFit: 'contain',
+          background: '#0B1220',
+          display: hasScreen ? 'block' : 'none'
+        }}
+      />
+      {!hasScreen && <MockDesktop />}
 
       {/* trade overlay */}
       {overlayTrade && (
@@ -82,15 +101,21 @@ export function StreamPreview({
           boxShadow: '0 6px 20px rgba(0,0,0,0.35)'
         }}
       >
-        {cameraRef ? (
+        {cameraRef && (
           <video
             ref={cameraRef}
             autoPlay
             muted
             playsInline
-            style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+            style={{
+              width: '100%',
+              height: '100%',
+              objectFit: 'cover',
+              display: hasCamera ? 'block' : 'none'
+            }}
           />
-        ) : (
+        )}
+        {!hasCamera && (
           <div
             style={{
               width: '100%',
@@ -102,7 +127,7 @@ export function StreamPreview({
           >
             <div style={{ textAlign: 'center' }}>
               <VideoIcon size={22} />
-              <div style={{ ...typography.caption, marginTop: 4 }}>Camera</div>
+              <div style={{ ...typography.caption, marginTop: 4 }}>No camera</div>
             </div>
           </div>
         )}

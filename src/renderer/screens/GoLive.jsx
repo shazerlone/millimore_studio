@@ -4,7 +4,9 @@ import { typography } from '@theme/typography'
 import { Page, PageHeader } from '@components/Page'
 import { StreamPreview } from '@components/StreamPreview'
 import { Card, Field, Input, Toggle, Badge, Button, Spinner } from '@components/ui'
-import { LiveIcon, LockIcon, SignalIcon, LayersIcon, CheckIcon } from '@components/Icons'
+import { LiveIcon, LockIcon, SignalIcon, LayersIcon, CheckIcon, VideoIcon, InfoIcon } from '@components/Icons'
+import { ScreenSourcePicker } from '@components/ScreenSourcePicker'
+import { StreamKeyGuide, STREAM_KEY_GUIDES } from '@components/StreamKeyGuide'
 import { destinations as DESTS, qualityOptions, sampleTrade } from '../data/mock'
 import { formatElapsed } from '../lib/quality'
 import { StreamCompositor } from '../lib/compositor'
@@ -23,8 +25,21 @@ export function GoLive() {
   const [elapsed, setElapsed] = useState('00:00:00')
   const [overlayTrade, setOverlayTrade] = useState(null)
 
+  // capture state
+  const [hasCamera, setHasCamera] = useState(false)
+  const [hasScreen, setHasScreen] = useState(false)
+  const [screenSource, setScreenSource] = useState(null)
+  const [perms, setPerms] = useState(null)
+  const [captureError, setCaptureError] = useState(null)
+
+  // modals
+  const [showPicker, setShowPicker] = useState(false)
+  const [guidePlatform, setGuidePlatform] = useState(null)
+
   const cameraRef = useRef(null)
+  const screenRef = useRef(null)
   const cameraStream = useRef(null)
+  const screenStream = useRef(null)
   const compositor = useRef(null)
   const timerRef = useRef(null)
   const startedAt = useRef(null)
@@ -32,27 +47,37 @@ export function GoLive() {
   // Load saved stream keys (decrypted in main via safeStorage).
   useEffect(() => {
     if (!bridge) return
-    bridge.keys.getAll().then((all) =>
-      setKeys((k) => ({ ...k, ...all }))
-    )
+    bridge.keys.getAll().then((all) => setKeys((k) => ({ ...k, ...all })))
   }, [bridge])
 
-  // Live camera preview.
+  // Request camera/mic permission (macOS) then start the camera preview.
   useEffect(() => {
-    let active = true
-    navigator.mediaDevices
-      ?.getUserMedia({ video: { width: 640, height: 480 }, audio: false })
-      .then((stream) => {
-        if (!active) return stream.getTracks().forEach((t) => t.stop())
+    let cancelled = false
+    async function initCamera() {
+      try {
+        if (bridge?.capture?.permissions) {
+          const p = await bridge.capture.permissions()
+          if (!cancelled) setPerms(p)
+        }
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+          audio: true
+        })
+        if (cancelled) return stream.getTracks().forEach((t) => t.stop())
         cameraStream.current = stream
         if (cameraRef.current) cameraRef.current.srcObject = stream
-      })
-      .catch(() => {})
+        setHasCamera(true)
+      } catch (err) {
+        if (!cancelled) setCaptureError('camera')
+        console.error('Camera error:', err)
+      }
+    }
+    initCamera()
     return () => {
-      active = false
+      cancelled = true
       cameraStream.current?.getTracks().forEach((t) => t.stop())
     }
-  }, [])
+  }, [bridge])
 
   // Subscribe to live trade events to drive the overlay preview.
   useEffect(() => {
@@ -62,6 +87,38 @@ export function GoLive() {
       else setOverlayTrade(t)
     })
   }, [bridge])
+
+  useEffect(() => () => {
+    clearInterval(timerRef.current)
+    screenStream.current?.getTracks().forEach((t) => t.stop())
+  }, [])
+
+  // ---- screen capture ----
+  const pickScreen = async (source) => {
+    setShowPicker(false)
+    try {
+      screenStream.current?.getTracks().forEach((t) => t.stop())
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: {
+          mandatory: {
+            chromeMediaSource: 'desktop',
+            chromeMediaSourceId: source.id,
+            maxWidth: 1920,
+            maxHeight: 1080
+          }
+        }
+      })
+      screenStream.current = stream
+      if (screenRef.current) screenRef.current.srcObject = stream
+      setScreenSource(source)
+      setHasScreen(true)
+      setCaptureError(null)
+    } catch (err) {
+      setCaptureError('screen')
+      console.error('Screen capture error:', err)
+    }
+  }
 
   const runSpeedTest = async () => {
     setTesting(true)
@@ -78,9 +135,7 @@ export function GoLive() {
 
   const startTimer = () => {
     startedAt.current = Date.now()
-    timerRef.current = setInterval(() => {
-      setElapsed(formatElapsed(Date.now() - startedAt.current))
-    }, 500)
+    timerRef.current = setInterval(() => setElapsed(formatElapsed(Date.now() - startedAt.current)), 500)
   }
 
   const goLive = async () => {
@@ -92,19 +147,23 @@ export function GoLive() {
     try {
       if (bridge) {
         await bridge.stream.start({ quality, destinations: dests, title, overlayRelayKey: keys.millimore || 'demo' })
-        // Composite screen + camera and feed FFmpeg.
-        const sources = await bridge.getScreenSources()
-        if (sources[0]) {
+        // Composite the chosen screen + camera and feed FFmpeg.
+        let sourceId = screenSource?.id
+        if (!sourceId) {
+          const sources = await bridge.capture.getSources()
+          sourceId = sources[0]?.id
+        }
+        if (sourceId) {
           compositor.current = new StreamCompositor({ quality })
-          await compositor.current.start(sources[0].id, cameraStream.current)
+          await compositor.current.start(sourceId, cameraStream.current)
         }
       }
       setIsLive(true)
       startTimer()
-      // Demo: surface a sample trade card shortly after going live.
       if (overlayEnabled) setTimeout(() => setOverlayTrade(sampleTrade), 2500)
     } catch (err) {
       console.error('Failed to go live:', err)
+      setCaptureError('stream')
     } finally {
       setStarting(false)
     }
@@ -120,9 +179,8 @@ export function GoLive() {
     setIsLive(false)
   }
 
-  useEffect(() => () => clearInterval(timerRef.current), [])
-
   const activeCount = DESTS.filter((d) => enabled[d.platform]).length
+  const screenDenied = perms && perms.screen && perms.screen !== 'granted'
 
   return (
     <Page maxWidth={1320}>
@@ -150,7 +208,65 @@ export function GoLive() {
             overlayTrade={overlayEnabled ? overlayTrade : null}
             overlayConfig={overlayConfig}
             cameraRef={cameraRef}
+            screenRef={screenRef}
+            hasScreen={hasScreen}
+            hasCamera={hasCamera}
           />
+
+          {/* capture controls */}
+          <Card padding={14}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+              <Button
+                variant={hasScreen ? 'secondary' : 'primary'}
+                size="sm"
+                icon={<VideoIcon size={16} />}
+                onClick={() => setShowPicker(true)}
+                disabled={isLive}
+              >
+                {hasScreen ? 'Change screen' : 'Select screen to share'}
+              </Button>
+              {hasScreen && (
+                <Badge tone="green">
+                  <CheckIcon size={12} /> {screenSource?.name?.slice(0, 28) || 'Screen'}
+                </Badge>
+              )}
+              <Badge tone={hasCamera ? 'green' : 'amber'}>
+                <VideoIcon size={12} /> {hasCamera ? 'Camera on' : 'Camera off'}
+              </Badge>
+            </div>
+
+            {(captureError || screenDenied) && (
+              <div
+                style={{
+                  marginTop: 12,
+                  ...typography.small,
+                  color: colors.warning,
+                  background: colors.warningSoft,
+                  padding: '10px 12px',
+                  borderRadius: radius.button,
+                  display: 'flex',
+                  gap: 8,
+                  alignItems: 'flex-start'
+                }}
+              >
+                <InfoIcon size={15} />
+                <div>
+                  {captureError === 'camera' && 'Camera access was blocked. '}
+                  {(captureError === 'screen' || screenDenied) && 'Screen Recording permission is needed. '}
+                  On macOS, allow it in System Settings → Privacy & Security, then reopen the app.
+                  {bridge?.capture?.openScreenPrefs && (
+                    <button
+                      onClick={() => bridge.capture.openScreenPrefs()}
+                      style={{ marginLeft: 6, color: colors.primary, fontWeight: 600 }}
+                    >
+                      Open settings
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+          </Card>
+
           <LiveStatsBar stats={streamStats} live={isLive} activeCount={activeCount} quality={quality} />
         </div>
 
@@ -172,6 +288,8 @@ export function GoLive() {
                   onToggle={(v) => setEnabled((e) => ({ ...e, [d.platform]: v }))}
                   keyValue={keys[d.platform] || ''}
                   onKey={(v) => saveKey(d.platform, v)}
+                  onGuide={() => setGuidePlatform(d.platform)}
+                  hasGuide={!!STREAM_KEY_GUIDES[d.platform]}
                   disabled={isLive}
                 />
               ))}
@@ -240,17 +358,18 @@ export function GoLive() {
           )}
         </Card>
       </div>
+
+      {showPicker && <ScreenSourcePicker onPick={pickScreen} onClose={() => setShowPicker(false)} />}
+      {guidePlatform && <StreamKeyGuide platform={guidePlatform} onClose={() => setGuidePlatform(null)} />}
     </Page>
   )
 }
 
 function SubLabel({ children }) {
-  return (
-    <div style={{ ...typography.label, color: colors.textSecondary, marginBottom: 10 }}>{children}</div>
-  )
+  return <div style={{ ...typography.label, color: colors.textSecondary, marginBottom: 10 }}>{children}</div>
 }
 
-function DestinationRow({ dest, on, onToggle, keyValue, onKey, disabled }) {
+function DestinationRow({ dest, on, onToggle, keyValue, onKey, onGuide, hasGuide, disabled }) {
   return (
     <div
       style={{
@@ -274,14 +393,31 @@ function DestinationRow({ dest, on, onToggle, keyValue, onKey, disabled }) {
         )}
       </div>
       {!dest.always && on && (
-        <Input
-          style={{ marginTop: 10, fontSize: 13 }}
-          type="password"
-          placeholder={`Paste ${dest.label} stream key`}
-          value={keyValue}
-          onChange={(e) => onKey(e.target.value)}
-          disabled={disabled}
-        />
+        <>
+          <Input
+            style={{ marginTop: 10, fontSize: 13 }}
+            type="password"
+            placeholder={`Paste ${dest.label} stream key`}
+            value={keyValue}
+            onChange={(e) => onKey(e.target.value)}
+            disabled={disabled}
+          />
+          {hasGuide && (
+            <button
+              onClick={onGuide}
+              style={{
+                marginTop: 8,
+                ...typography.caption,
+                color: colors.primary,
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 5
+              }}
+            >
+              <InfoIcon size={13} /> Where do I find my {dest.label} stream key?
+            </button>
+          )}
+        </>
       )}
     </div>
   )
