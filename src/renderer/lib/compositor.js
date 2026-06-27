@@ -1,7 +1,7 @@
 import { QUALITY_DIMS } from './quality'
 import { paintOverlay } from './overlayPainter'
 
-const BITRATES = { '720p30': 2_500_000, '1080p30': 4_500_000, '1080p60': 6_000_000 }
+const BITRATES = { '720p30': 3_500_000, '1080p30': 6_000_000, '1080p60': 9_000_000 }
 
 // Preferred MediaRecorder formats. H.264 lets FFmpeg stream-copy (lowest CPU /
 // latency); VP9/VP8 fall back to a light transcode.

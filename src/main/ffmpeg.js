@@ -19,9 +19,9 @@ export const RTMP_ENDPOINTS = {
 }
 
 export const QUALITY_PRESETS = {
-  '720p30': { width: 1280, height: 720, fps: 30, videoBitrate: '2500k', audioBitrate: '128k' },
-  '1080p30': { width: 1920, height: 1080, fps: 30, videoBitrate: '4500k', audioBitrate: '160k' },
-  '1080p60': { width: 1920, height: 1080, fps: 60, videoBitrate: '6000k', audioBitrate: '160k' }
+  '720p30': { width: 1280, height: 720, fps: 30, videoBitrate: '3500k', bufSize: '7000k', audioBitrate: '128k' },
+  '1080p30': { width: 1920, height: 1080, fps: 30, videoBitrate: '6000k', bufSize: '12000k', audioBitrate: '160k' },
+  '1080p60': { width: 1920, height: 1080, fps: 60, videoBitrate: '9000k', bufSize: '18000k', audioBitrate: '160k' }
 }
 
 /**
@@ -89,28 +89,33 @@ export class MultistreamEngine extends EventEmitter {
     const targets = this._buildTargets(config.destinations)
     const teeOutput = targets.map((url) => `[f=flv:onfail=ignore]${url}`).join('|')
 
-    // Video: copy if the browser already encoded H.264, otherwise transcode.
-    const videoArgs = config.videoCopy
-      ? ['-c:v', 'copy']
-      : [
-          '-c:v', 'libx264',
-          '-preset', 'veryfast',
-          '-tune', 'zerolatency',
-          '-pix_fmt', 'yuv420p',
-          '-b:v', preset.videoBitrate,
-          '-maxrate', preset.videoBitrate,
-          '-bufsize', preset.videoBitrate,
-          '-g', String(preset.fps * 2)
-        ]
-
+    // Always re-encode (never stream-copy). The renderer's MediaRecorder WebM
+    // has irregular keyframes and timestamps that RTMP/YouTube reject, causing
+    // the "No data" stalls. Re-encoding with wall-clock timestamps, constant
+    // frame rate and a fixed 2s GOP gives a continuous, healthy RTMP feed.
     const args = [
-      '-fflags', '+genpts',
-      '-i', 'pipe:0', // fragmented WebM from MediaRecorder
-      ...videoArgs,
-      // RTMP requires AAC audio; MediaRecorder gives us Opus, so always encode.
+      '-thread_queue_size', '512',
+      '-use_wallclock_as_timestamps', '1',
+      '-i', 'pipe:0',
+      // ---- video ----
+      '-c:v', 'libx264',
+      '-preset', 'veryfast',
+      '-tune', 'zerolatency',
+      '-profile:v', 'high',
+      '-pix_fmt', 'yuv420p',
+      '-r', String(preset.fps),
+      '-vsync', 'cfr',
+      '-g', String(preset.fps * 2),
+      '-keyint_min', String(preset.fps),
+      '-sc_threshold', '0',
+      '-b:v', preset.videoBitrate,
+      '-maxrate', preset.videoBitrate,
+      '-bufsize', preset.bufSize,
+      // ---- audio (RTMP needs AAC; MediaRecorder gives Opus) ----
       '-c:a', 'aac',
       '-b:a', preset.audioBitrate,
-      '-ar', '48000',
+      '-ar', '44100',
+      // ---- fan-out to every destination ----
       '-f', 'tee',
       '-map', '0:v:0',
       '-map', '0:a:0?',
