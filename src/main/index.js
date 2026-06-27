@@ -1,0 +1,181 @@
+import { join } from 'node:path'
+import {
+  app,
+  BrowserWindow,
+  ipcMain,
+  desktopCapturer,
+  safeStorage,
+  shell
+} from 'electron'
+import Store from 'electron-store'
+import { MultistreamEngine, testConnectionSpeed } from './ffmpeg.js'
+import { MT5Manager } from './mt5.js'
+import { OverlayManager } from './overlay.js'
+
+const store = new Store({ name: 'millimore-settings' })
+const keyStore = new Store({ name: 'millimore-keys' })
+
+const engine = new MultistreamEngine()
+const mt5 = new MT5Manager()
+const overlay = new OverlayManager()
+
+let mainWindow = null
+
+function createWindow() {
+  mainWindow = new BrowserWindow({
+    width: 1440,
+    height: 900,
+    minWidth: 1120,
+    minHeight: 720,
+    backgroundColor: '#FFFFFF',
+    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
+    show: false,
+    webPreferences: {
+      preload: join(__dirname, '../preload/index.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false
+    }
+  })
+
+  mainWindow.once('ready-to-show', () => mainWindow.show())
+
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    shell.openExternal(url)
+    return { action: 'deny' }
+  })
+
+  if (process.env.ELECTRON_RENDERER_URL) {
+    mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL)
+  } else {
+    mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+  }
+}
+
+// ---- forward engine / mt5 / overlay events to the renderer -------------
+
+function wireEvents() {
+  const send = (channel, payload) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send(channel, payload)
+    }
+  }
+
+  engine.on('status', (s) => send('stream:status', s))
+  engine.on('stats', (s) => send('stream:stats', s))
+
+  mt5.on('status', (s) => send('mt5:status', s))
+  mt5.on('trade', (trade) => {
+    overlay.handleTrade(trade)
+    send('mt5:trade', trade)
+  })
+
+  overlay.on('show', (card) => send('mt5:trade', { ...card, overlay: 'show' }))
+  overlay.on('hide', (payload) => send('mt5:trade', { ...payload, overlay: 'hide' }))
+}
+
+// ---- IPC: capture ------------------------------------------------------
+
+ipcMain.handle('capture:getSources', async () => {
+  const sources = await desktopCapturer.getSources({
+    types: ['screen', 'window'],
+    thumbnailSize: { width: 320, height: 180 }
+  })
+  return sources.map((s) => ({
+    id: s.id,
+    name: s.name,
+    thumbnail: s.thumbnail.toDataURL()
+  }))
+})
+
+// ---- IPC: stream -------------------------------------------------------
+
+ipcMain.handle('stream:start', (_e, config) => {
+  if (config?.overlayRelayKey) overlay.connectRelay(config.overlayRelayKey)
+  return engine.start(config)
+})
+ipcMain.handle('stream:stop', () => {
+  overlay.disconnectRelay()
+  return engine.stop()
+})
+ipcMain.on('stream:frame', (_e, buffer) => engine.pushFrame(buffer))
+ipcMain.handle('stream:testSpeed', () => testConnectionSpeed())
+
+// ---- IPC: MT5 ----------------------------------------------------------
+
+ipcMain.handle('mt5:connect', (_e, creds) => mt5.connect(creds))
+ipcMain.handle('mt5:disconnect', () => mt5.disconnect())
+ipcMain.handle('mt5:getAccount', () => mt5.getAccount())
+ipcMain.handle('mt5:syncTest', () => mt5.runSyncTest())
+
+// ---- IPC: secure stream-key vault (safeStorage) ------------------------
+
+ipcMain.handle('keys:set', (_e, { platform, key }) => {
+  if (safeStorage.isEncryptionAvailable()) {
+    const encrypted = safeStorage.encryptString(key).toString('base64')
+    keyStore.set(platform, encrypted)
+  } else {
+    // Fallback for platforms without an OS keychain — still local-only.
+    keyStore.set(platform, Buffer.from(key).toString('base64'))
+  }
+  return { ok: true }
+})
+
+ipcMain.handle('keys:get', (_e, platform) => readKey(platform))
+ipcMain.handle('keys:getAll', () => {
+  const out = {}
+  for (const platform of Object.keys(keyStore.store)) {
+    out[platform] = readKey(platform)
+  }
+  return out
+})
+ipcMain.handle('keys:remove', (_e, platform) => {
+  keyStore.delete(platform)
+  return { ok: true }
+})
+
+function readKey(platform) {
+  const stored = keyStore.get(platform)
+  if (!stored) return null
+  const buf = Buffer.from(stored, 'base64')
+  try {
+    if (safeStorage.isEncryptionAvailable()) return safeStorage.decryptString(buf)
+  } catch {
+    /* fall through to plain decode */
+  }
+  return buf.toString('utf8')
+}
+
+// ---- IPC: settings -----------------------------------------------------
+
+ipcMain.handle('settings:get', (_e, key) => store.get(key))
+ipcMain.handle('settings:set', (_e, { key, value }) => {
+  store.set(key, value)
+  return { ok: true }
+})
+ipcMain.handle('settings:all', () => store.store)
+
+// ---- IPC: app ----------------------------------------------------------
+
+ipcMain.handle('app:getVersion', () => app.getVersion())
+ipcMain.handle('app:checkForUpdates', async () => {
+  // Wire to electron-updater in production.
+  return { upToDate: true, version: app.getVersion() }
+})
+
+// ---- lifecycle ---------------------------------------------------------
+
+app.whenReady().then(() => {
+  wireEvents()
+  createWindow()
+  app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+  })
+})
+
+app.on('window-all-closed', () => {
+  engine.stop()
+  overlay.dispose()
+  if (mt5.isConnected) mt5.disconnect()
+  if (process.platform !== 'darwin') app.quit()
+})
