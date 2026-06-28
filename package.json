@@ -46,6 +46,12 @@
     "asarUnpack": [
       "**/node_modules/ffmpeg-static/**"
     ],
+    "extraResources": [
+      {
+        "from": "build/icon.png",
+        "to": "icon.png"
+      }
+    ],
     "icon": "build/icon.png",
     "mac": {
       "category": "public.app-category.video",

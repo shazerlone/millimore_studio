@@ -26,6 +26,8 @@ const api = {
     // main window → monitor window
     pushState: (state) => ipcRenderer.send('monitor:state', state),
     onState: (cb) => subscribe('monitor:state:update', cb),
+    pushPreview: (dataUrl) => ipcRenderer.send('monitor:preview', dataUrl),
+    onPreview: (cb) => subscribe('monitor:preview:update', cb),
     // monitor window → main window
     command: (cmd) => ipcRenderer.send('monitor:command', cmd),
     onCommand: (cb) => subscribe('monitor:command:relay', cb)

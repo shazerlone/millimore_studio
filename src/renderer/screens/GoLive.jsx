@@ -137,7 +137,8 @@ export function GoLive() {
     // by the compositor's recorder, so re-acquiring updates it live.
     setTimeout(async () => {
       try {
-        await acquireCamera()
+        const stream = await acquireCamera()
+        if (isLive) compositor.current?.setCameraStream(stream)
       } catch (err) {
         console.error('Device switch failed:', err)
       }
@@ -242,6 +243,8 @@ export function GoLive() {
       setScreenSource(source)
       setHasScreen(true)
       setCaptureError(null)
+      // If we're already live, switch the broadcast's screen source on the fly.
+      if (isLive) await compositor.current?.setScreenSource(source.id)
     } catch (err) {
       setCaptureError('screen')
       console.error('Screen capture error:', err)
@@ -254,6 +257,8 @@ export function GoLive() {
     if (screenRef.current) screenRef.current.srcObject = null
     setScreenSource(null)
     setHasScreen(false)
+    // Live: drop back to camera-only on the broadcast too.
+    if (isLive) compositor.current?.setScreenSource(null)
   }
 
   const runSpeedTest = async () => {
@@ -294,24 +299,19 @@ export function GoLive() {
     }))
     try {
       if (bridge) {
-        // Set up the compositor + recorder FIRST so a screen-permission failure
-        // surfaces before we open RTMP connections.
-        let sourceId = screenSource?.id
-        if (!sourceId) {
-          const sources = await bridge.capture.getSources()
-          sourceId = sources[0]?.id
-        }
-        if (!sourceId) throw new Error('NO_SCREEN')
-
+        // Build the compositor around the camera. The broadcast matches the
+        // preview: camera-only unless the trader has shared a screen.
         compositor.current = new StreamCompositor({
           quality,
           getOverlay: () => ({
             config: overlayConfigRef.current,
             trade: overlayTradeRef.current,
             scene: sceneRef.current
-          })
+          }),
+          onThumbnail: (url) => bridge.monitor.pushPreview(url)
         })
-        const { videoCopy } = await compositor.current.prepare(sourceId, cameraStream.current)
+        const { videoCopy } = await compositor.current.prepare(cameraStream.current)
+        if (screenSource?.id) await compositor.current.setScreenSource(screenSource.id)
 
         // Start FFmpeg, then begin emitting chunks (so the WebM header isn't lost).
         const startRes = await bridge.stream.start({
@@ -432,7 +432,6 @@ export function GoLive() {
                 size="sm"
                 icon={<VideoIcon size={16} />}
                 onClick={() => setShowPicker(true)}
-                disabled={isLive}
                 data-coach="screen"
               >
                 {hasScreen ? 'Change screen' : 'Select screen to share'}
@@ -443,7 +442,6 @@ export function GoLive() {
                     variant="ghost"
                     size="sm"
                     onClick={stopSharing}
-                    disabled={isLive}
                     style={{ color: colors.live }}
                   >
                     Stop sharing
@@ -682,6 +680,27 @@ export function GoLive() {
                 </button>
               ))}
             </div>
+
+            {scene !== 'live' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 10 }}>
+                <Input
+                  value={overlayConfig.scenes?.[scene]?.title || ''}
+                  placeholder="Scene title"
+                  onChange={(e) =>
+                    updateOverlay({ scenes: { [scene]: { ...overlayConfig.scenes[scene], title: e.target.value } } })
+                  }
+                  style={{ fontSize: 13 }}
+                />
+                <Input
+                  value={overlayConfig.scenes?.[scene]?.sub || ''}
+                  placeholder="Scene subtitle"
+                  onChange={(e) =>
+                    updateOverlay({ scenes: { [scene]: { ...overlayConfig.scenes[scene], sub: e.target.value } } })
+                  }
+                  style={{ fontSize: 13 }}
+                />
+              </div>
+            )}
           </div>
 
           {/* GO LIVE */}

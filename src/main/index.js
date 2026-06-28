@@ -8,6 +8,9 @@ import {
   session,
   systemPreferences,
   powerSaveBlocker,
+  Tray,
+  Menu,
+  nativeImage,
   shell
 } from 'electron'
 
@@ -37,8 +40,43 @@ let mainWindow = null
 // ---- floating, capture-protected stream monitor ------------------------
 
 let monitorWin = null
+let tray = null
 let streaming = false
 let monitorAuto = true // auto show/hide the monitor when the main app loses focus
+
+function createTray() {
+  if (tray) return
+  const iconPath = app.isPackaged
+    ? join(process.resourcesPath, 'icon.png')
+    : join(__dirname, '../../build/icon.png')
+  let img = nativeImage.createFromPath(iconPath)
+  if (!img.isEmpty()) img = img.resize({ width: 18, height: 18 })
+  tray = new Tray(img.isEmpty() ? nativeImage.createEmpty() : img)
+  tray.setToolTip('Millimore Desktop')
+  tray.setContextMenu(
+    Menu.buildFromTemplate([
+      { label: 'Show floating monitor', click: () => showMonitor() },
+      { label: 'Hide floating monitor', click: () => hideMonitor() },
+      { type: 'separator' },
+      {
+        label: 'Open Millimore',
+        click: () => {
+          if (mainWindow) {
+            mainWindow.show()
+            mainWindow.focus()
+          }
+        }
+      },
+      { type: 'separator' },
+      { label: 'Quit Millimore', click: () => app.quit() }
+    ])
+  )
+  // Left-click toggles the monitor for quick access.
+  tray.on('click', () => {
+    if (monitorWin && monitorWin.isVisible()) hideMonitor()
+    else showMonitor()
+  })
+}
 
 function createMonitorWindow() {
   if (monitorWin && !monitorWin.isDestroyed()) return monitorWin
@@ -330,6 +368,12 @@ ipcMain.on('monitor:state', (_e, state) => {
     monitorWin.webContents.send('monitor:state:update', state)
   }
 })
+// Live composite thumbnail → forward to the monitor window.
+ipcMain.on('monitor:preview', (_e, dataUrl) => {
+  if (monitorWin && !monitorWin.isDestroyed()) {
+    monitorWin.webContents.send('monitor:preview:update', dataUrl)
+  }
+})
 // Monitor window issues a control command → forward to the main window.
 ipcMain.on('monitor:command', (_e, cmd) => {
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -411,6 +455,7 @@ app.whenReady().then(() => {
   setupMediaPermissions()
   wireEvents()
   createWindow()
+  createTray()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })

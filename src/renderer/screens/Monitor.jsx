@@ -1,7 +1,6 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { colors, radius } from '@theme/colors'
 import { typography } from '@theme/typography'
-import { TradeCard } from '@components/TradeCard'
 import { Star } from '@components/Logo'
 import { VideoIcon, LayersIcon } from '@components/Icons'
 
@@ -14,32 +13,22 @@ const bridge = typeof window !== 'undefined' ? window.millimore : null
  * Studio — without any of it appearing on the broadcast.
  */
 export function Monitor() {
-  const camRef = useRef(null)
   const [state, setState] = useState({ live: false, elapsed: '00:00:00', trade: null, overlayConfig: {}, stats: null })
-  const [hasCam, setHasCam] = useState(false)
-
-  // Own camera self-view (independent of the main window).
-  useEffect(() => {
-    let stream
-    navigator.mediaDevices
-      ?.getUserMedia({ video: { width: 320, height: 240 }, audio: false })
-      .then((s) => {
-        stream = s
-        if (camRef.current) camRef.current.srcObject = s
-        setHasCam(true)
-      })
-      .catch(() => setHasCam(false))
-    return () => stream?.getTracks().forEach((t) => t.stop())
-  }, [])
+  const [preview, setPreview] = useState(null)
 
   useEffect(() => {
     if (!bridge) return
-    return bridge.monitor.onState((s) => setState((prev) => ({ ...prev, ...s })))
+    const offState = bridge.monitor.onState((s) => setState((prev) => ({ ...prev, ...s })))
+    const offPrev = bridge.monitor.onPreview((url) => setPreview(url))
+    return () => {
+      offState?.()
+      offPrev?.()
+    }
   }, [])
 
   const cmd = (type, payload) => bridge?.monitor.command({ type, payload })
 
-  const { live, elapsed, trade, overlayConfig, stats } = state
+  const { live, elapsed, trade, stats } = state
 
   return (
     <div
@@ -92,21 +81,16 @@ export function Monitor() {
         </button>
       </div>
 
-      {/* camera self-view */}
-      <div style={{ position: 'relative', aspectRatio: '4 / 3', background: '#111827', flexShrink: 0 }}>
-        {hasCam ? (
-          <video ref={camRef} autoPlay muted playsInline style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+      {/* live output (exactly what viewers see) */}
+      <div style={{ position: 'relative', aspectRatio: '16 / 9', background: '#000', flexShrink: 0 }}>
+        {preview ? (
+          <img src={preview} alt="Live output" style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
         ) : (
           <div style={{ display: 'grid', placeItems: 'center', height: '100%', color: 'rgba(255,255,255,0.5)' }}>
             <div style={{ textAlign: 'center' }}>
               <VideoIcon size={20} />
-              <div style={{ ...typography.caption, marginTop: 4 }}>Camera in use by stream</div>
+              <div style={{ ...typography.caption, marginTop: 4 }}>{live ? 'Connecting…' : 'Not streaming'}</div>
             </div>
-          </div>
-        )}
-        {trade && (
-          <div style={{ position: 'absolute', left: 8, bottom: 8, right: 8 }}>
-            <TradeCard trade={trade} style="minimal" theme="dark" branded={false} scale={0.62} />
           </div>
         )}
       </div>
@@ -138,9 +122,6 @@ export function Monitor() {
           Hidden from your viewers
         </div>
       </div>
-
-      {/* keep overlayConfig referenced for future use */}
-      <span style={{ display: 'none' }}>{overlayConfig ? '' : ''}</span>
     </div>
   )
 }

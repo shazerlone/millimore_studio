@@ -3,8 +3,6 @@ import { paintOverlay } from './overlayPainter'
 
 const BITRATES = { '720p30': 3_500_000, '1080p30': 6_000_000, '1080p60': 9_000_000 }
 
-// Preferred MediaRecorder formats. H.264 lets FFmpeg stream-copy (lowest CPU /
-// latency); VP9/VP8 fall back to a light transcode.
 const MIME_PREFS = [
   'video/webm;codecs=h264,opus',
   'video/webm;codecs=h264',
@@ -27,62 +25,49 @@ function pickMime() {
 }
 
 /**
- * StreamCompositor draws the screen capture, camera (picture-in-picture) and the
- * Millimore overlay into a single canvas, captures that canvas as a MediaStream,
- * and uses MediaRecorder to hardware-encode it to a compressed WebM stream. The
- * compressed chunks are shipped to the main process for FFmpeg to remux to RTMP.
- *
- * This compresses in the renderer instead of shipping raw frames over IPC, which
- * is the difference between a smooth low-latency stream and a stuttering one.
+ * StreamCompositor draws the scene (camera-only, or screen + camera PiP) plus the
+ * Millimore overlay into a canvas, captures it as a MediaStream and encodes it
+ * with MediaRecorder. What's drawn matches the in-app preview exactly:
+ *   - no screen shared  → the camera fills the frame
+ *   - screen shared     → screen is the base layer, camera is a shaped PiP
+ * The screen source can be set/changed/cleared live without restarting.
  */
 export class StreamCompositor {
-  constructor({ quality = '1080p30', getOverlay = null } = {}) {
+  constructor({ quality = '1080p30', getOverlay = null, onThumbnail = null } = {}) {
     const dims = QUALITY_DIMS[quality] || QUALITY_DIMS['1080p30']
     this.width = dims.width
     this.height = dims.height
     this.fps = dims.fps
-    this.bitrate = BITRATES[quality] || 4_500_000
+    this.bitrate = BITRATES[quality] || 6_000_000
     this.getOverlay = getOverlay
+    this.onThumbnail = onThumbnail
 
     this.canvas = document.createElement('canvas')
     this.canvas.width = this.width
     this.canvas.height = this.height
     this.ctx = this.canvas.getContext('2d', { alpha: false, desynchronized: true })
 
+    // Small offscreen canvas for the monitor preview thumbnail.
+    this.thumb = document.createElement('canvas')
+    this.thumb.width = 480
+    this.thumb.height = 270
+    this.thumbCtx = this.thumb.getContext('2d')
+
     this.screenVideo = document.createElement('video')
     this.cameraVideo = document.createElement('video')
     this.screenVideo.muted = this.cameraVideo.muted = true
 
+    this.screenStream = null
+    this.hasScreen = false
     this._timer = null
+    this._thumbTimer = null
     this._running = false
     this.recorder = null
     this._videoCopy = false
   }
 
-  /**
-   * Acquire the screen, wire up the canvas capture + recorder, and report whether
-   * the chosen codec lets FFmpeg stream-copy. Call beginRecording() once the
-   * FFmpeg engine is ready to receive chunks.
-   *
-   * @param {string} screenSourceId Electron desktopCapturer source id
-   * @param {MediaStream} cameraStream camera + mic stream (audio is muxed in)
-   */
-  async prepare(screenSourceId, cameraStream) {
-    this.screenStream = await navigator.mediaDevices.getUserMedia({
-      audio: false,
-      video: {
-        mandatory: {
-          chromeMediaSource: 'desktop',
-          chromeMediaSourceId: screenSourceId,
-          maxWidth: this.width,
-          maxHeight: this.height,
-          maxFrameRate: this.fps
-        }
-      }
-    })
-    this.screenVideo.srcObject = this.screenStream
-    await this.screenVideo.play()
-
+  /** Set up the camera + canvas capture + recorder. Screen is optional/added later. */
+  async prepare(cameraStream) {
     if (cameraStream) {
       this.cameraVideo.srcObject = cameraStream
       await this.cameraVideo.play().catch(() => {})
@@ -91,7 +76,6 @@ export class StreamCompositor {
     this._running = true
     this._loop()
 
-    // Build the output stream: composited canvas video + the mic audio track.
     this.outStream = this.canvas.captureStream(this.fps)
     const micTrack = cameraStream?.getAudioTracks?.()[0]
     if (micTrack) this.outStream.addTrack(micTrack)
@@ -108,20 +92,51 @@ export class StreamCompositor {
         e.data.arrayBuffer().then((buf) => window.millimore?.stream.pushChunk(buf))
       }
     }
+
+    if (this.onThumbnail) {
+      this._thumbTimer = setInterval(() => this._emitThumb(), 280)
+    }
+
     return { videoCopy: this._videoCopy, mime }
   }
 
-  /** Start emitting chunks (call after the engine is listening). */
+  /** Acquire / replace / clear the screen source — works live. */
+  async setScreenSource(sourceId) {
+    this.screenStream?.getTracks().forEach((t) => t.stop())
+    this.screenStream = null
+    this.screenVideo.srcObject = null
+    this.hasScreen = false
+    if (!sourceId) return
+
+    this.screenStream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: {
+        mandatory: {
+          chromeMediaSource: 'desktop',
+          chromeMediaSourceId: sourceId,
+          maxWidth: this.width,
+          maxHeight: this.height,
+          maxFrameRate: this.fps
+        }
+      }
+    })
+    this.screenVideo.srcObject = this.screenStream
+    await this.screenVideo.play().catch(() => {})
+    this.hasScreen = true
+  }
+
+  /** Swap the camera stream live (e.g. device change). */
+  setCameraStream(cameraStream) {
+    if (!cameraStream) return
+    this.cameraVideo.srcObject = cameraStream
+    this.cameraVideo.play().catch(() => {})
+  }
+
   beginRecording(timesliceMs = 250) {
-    if (this.recorder && this.recorder.state === 'inactive') {
-      this.recorder.start(timesliceMs)
-    }
+    if (this.recorder && this.recorder.state === 'inactive') this.recorder.start(timesliceMs)
   }
 
   _loop() {
-    // A timer (not requestAnimationFrame) keeps painting at full rate even when
-    // the window is in the background — rAF pauses when the page is occluded,
-    // which would freeze the broadcast the moment the trader switches apps.
     const frameMs = 1000 / this.fps
     this._timer = setInterval(() => {
       if (this._running) this._drawFrame()
@@ -133,28 +148,15 @@ export class StreamCompositor {
     ctx.fillStyle = '#0B1220'
     ctx.fillRect(0, 0, width, height)
 
-    if (this.screenVideo.readyState >= 2) {
-      ctx.drawImage(this.screenVideo, 0, 0, width, height)
-    }
+    const screenReady = this.hasScreen && this.screenVideo.readyState >= 2
 
-    if (this.cameraVideo.readyState >= 2) {
-      const cam = this.getOverlay?.()?.config?.camera || { shape: 'rectangle', x: 0.71, y: 0.68, w: 0.26 }
-      const isRound = cam.shape === 'square' || cam.shape === 'circle'
-      const camW = Math.round(width * cam.w)
-      const camH = Math.round(isRound ? camW : camW * 0.75)
-      const x = Math.round(cam.x * width)
-      const y = Math.round(cam.y * height)
-
-      ctx.save()
-      this._cameraClip(ctx, cam.shape, x, y, camW, camH)
-      ctx.clip()
-      // cover-fit the camera into the shape box
-      drawCover(ctx, this.cameraVideo, x, y, camW, camH)
-      ctx.restore()
-      ctx.lineWidth = Math.max(2, width * 0.0016)
-      ctx.strokeStyle = 'rgba(255,255,255,0.9)'
-      this._cameraClip(ctx, cam.shape, x, y, camW, camH)
-      ctx.stroke()
+    if (screenReady) {
+      // screen base (contain to avoid distortion) + camera PiP
+      drawContain(ctx, this.screenVideo, 0, 0, width, height)
+      if (this.cameraVideo.readyState >= 2) this._drawCameraPiP()
+    } else if (this.cameraVideo.readyState >= 2) {
+      // camera-only: fill the frame (matches the preview)
+      drawCover(ctx, this.cameraVideo, 0, 0, width, height)
     }
 
     if (this.getOverlay) {
@@ -166,7 +168,25 @@ export class StreamCompositor {
     }
   }
 
-  /** Build the clip path for the camera box based on its shape. */
+  _drawCameraPiP() {
+    const cam = this.getOverlay?.()?.config?.camera || { shape: 'rectangle', x: 0.71, y: 0.68, w: 0.26 }
+    const isRound = cam.shape === 'square' || cam.shape === 'circle'
+    const camW = Math.round(this.width * cam.w)
+    const camH = Math.round(isRound ? camW : camW * 0.75)
+    const x = Math.round(cam.x * this.width)
+    const y = Math.round(cam.y * this.height)
+    const ctx = this.ctx
+    ctx.save()
+    this._cameraClip(ctx, cam.shape, x, y, camW, camH)
+    ctx.clip()
+    drawCover(ctx, this.cameraVideo, x, y, camW, camH)
+    ctx.restore()
+    ctx.lineWidth = Math.max(2, this.width * 0.0016)
+    ctx.strokeStyle = 'rgba(255,255,255,0.9)'
+    this._cameraClip(ctx, cam.shape, x, y, camW, camH)
+    ctx.stroke()
+  }
+
   _cameraClip(ctx, shape, x, y, w, h) {
     if (shape === 'circle' || shape === 'oval') {
       ctx.beginPath()
@@ -178,16 +198,24 @@ export class StreamCompositor {
     }
   }
 
+  _emitThumb() {
+    try {
+      this.thumbCtx.drawImage(this.canvas, 0, 0, this.thumb.width, this.thumb.height)
+      this.onThumbnail(this.thumb.toDataURL('image/jpeg', 0.5))
+    } catch {
+      /* ignore */
+    }
+  }
+
   stop() {
     this._running = false
     if (this._timer) clearInterval(this._timer)
+    if (this._thumbTimer) clearInterval(this._thumbTimer)
     try {
       if (this.recorder && this.recorder.state !== 'inactive') this.recorder.stop()
     } catch {
       /* already stopped */
     }
-    // Stop the screen capture and the composited video track, but leave the mic
-    // track alone — it's owned by the caller's camera stream.
     this.screenStream?.getTracks().forEach((t) => t.stop())
     this.outStream?.getVideoTracks().forEach((t) => t.stop())
     this.screenVideo.srcObject = null
@@ -205,7 +233,7 @@ function roundRect(ctx, x, y, w, h, r) {
   ctx.closePath()
 }
 
-/** Draw a video into a box with object-fit: cover (center-crop). */
+/** object-fit: cover (center-crop). */
 function drawCover(ctx, video, dx, dy, dw, dh) {
   const vw = video.videoWidth
   const vh = video.videoHeight
@@ -219,4 +247,18 @@ function drawCover(ctx, video, dx, dy, dw, dh) {
   const sx = (vw - sw) / 2
   const sy = (vh - sh) / 2
   ctx.drawImage(video, sx, sy, sw, sh, dx, dy, dw, dh)
+}
+
+/** object-fit: contain (letterbox), so a captured screen isn't distorted. */
+function drawContain(ctx, video, dx, dy, dw, dh) {
+  const vw = video.videoWidth
+  const vh = video.videoHeight
+  if (!vw || !vh) {
+    ctx.drawImage(video, dx, dy, dw, dh)
+    return
+  }
+  const scale = Math.min(dw / vw, dh / vh)
+  const w = vw * scale
+  const h = vh * scale
+  ctx.drawImage(video, dx + (dw - w) / 2, dy + (dh - h) / 2, w, h)
 }

@@ -114,7 +114,7 @@ export function StreamPreview({
       </div>
 
       {/* full-screen scene (covers everything on the broadcast) */}
-      {scene && scene !== 'live' && <SceneOverlay scene={scene} />}
+      {scene && scene !== 'live' && <SceneOverlay scene={scene} text={overlayConfig.scenes?.[scene]} />}
 
       {/* live badge + timer */}
       {live && (
@@ -179,8 +179,8 @@ const SCENE_TEXT = {
 }
 
 /** Full-screen branded scene overlay (preview of Starting Soon / BRB / Ending). */
-function SceneOverlay({ scene }) {
-  const s = SCENE_TEXT[scene] || SCENE_TEXT.starting
+function SceneOverlay({ scene, text }) {
+  const s = text || SCENE_TEXT[scene] || SCENE_TEXT.starting
   return (
     <div
       style={{

@@ -18,7 +18,8 @@ export function paintOverlay(ctx, W, H, state, tMs) {
 
   // Full-screen scene (Starting Soon / BRB / Ending) covers everything.
   if (state.scene && state.scene !== 'live') {
-    drawScene(ctx, W, H, u, state.scene)
+    const text = (cfg.scenes && cfg.scenes[state.scene]) || SCENES[state.scene]
+    drawScene(ctx, W, H, u, text)
     if (cfg.watermark?.enabled) {
       drawWatermark(ctx, W, H, u, { isRight: true, isBottom: true, pad: 28 * u, bottomInset: 28 * u, topInset: 28 * u }, cfg.watermark)
     }
@@ -50,8 +51,8 @@ export const SCENES = {
   ending: { title: 'Thanks for watching', sub: 'See you in the next session' }
 }
 
-function drawScene(ctx, W, H, u, scene) {
-  const s = SCENES[scene] || SCENES.starting
+function drawScene(ctx, W, H, u, text) {
+  const s = text || SCENES.starting
   // full-bleed brand background
   ctx.fillStyle = '#0B1220'
   ctx.fillRect(0, 0, W, H)

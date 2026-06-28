@@ -14,6 +14,12 @@ const DEFAULT_OVERLAY = {
   // Camera picture-in-picture layout (normalized to the canvas, 0–1).
   // shape: rectangle | square | circle | oval
   camera: { shape: 'rectangle', x: 0.71, y: 0.68, w: 0.26 },
+  // Editable full-screen scene copy.
+  scenes: {
+    starting: { title: 'Starting soon', sub: 'The live session will begin shortly' },
+    brb: { title: 'Be right back', sub: 'Stay tuned — back in a moment' },
+    ending: { title: 'Thanks for watching', sub: 'See you in the next session' }
+  },
   // Persistent Millimore brand watermark — expands into the trade card.
   watermark: { enabled: true, opacity: 0.92 },
   // Scrolling lower-third ticker (disclaimer / links / subscribers).
@@ -89,7 +95,8 @@ export function AppProvider({ children }) {
         fields: { ...c.fields, ...(patch.fields || {}) },
         watermark: { ...c.watermark, ...(patch.watermark || {}) },
         ticker: { ...c.ticker, ...(patch.ticker || {}) },
-        camera: { ...c.camera, ...(patch.camera || {}) }
+        camera: { ...c.camera, ...(patch.camera || {}) },
+        scenes: { ...c.scenes, ...(patch.scenes || {}) }
       }
       bridge?.settings.set('overlayConfig', next)
       return next
