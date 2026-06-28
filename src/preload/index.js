@@ -19,6 +19,18 @@ const api = {
   openExternal: (url) => ipcRenderer.invoke('app:openExternal', url),
   restart: () => ipcRenderer.invoke('app:restart'),
 
+  // ---- floating capture-protected monitor ----
+  monitor: {
+    toggle: (on) => ipcRenderer.invoke('monitor:toggle', on),
+    setAuto: (v) => ipcRenderer.invoke('monitor:setAuto', v),
+    // main window → monitor window
+    pushState: (state) => ipcRenderer.send('monitor:state', state),
+    onState: (cb) => subscribe('monitor:state:update', cb),
+    // monitor window → main window
+    command: (cmd) => ipcRenderer.send('monitor:command', cmd),
+    onCommand: (cb) => subscribe('monitor:command:relay', cb)
+  },
+
   // ---- Multistream engine (FFmpeg) ----
   stream: {
     start: (config) => ipcRenderer.invoke('stream:start', config),

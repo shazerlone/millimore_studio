@@ -24,6 +24,7 @@ export function StreamPreview({
   screenRef = null,
   hasScreen = false,
   hasCamera = true,
+  scene = 'live',
   onCameraChange = null,
   interactive = true
 }) {
@@ -112,6 +113,9 @@ export function StreamPreview({
         )}
       </div>
 
+      {/* full-screen scene (covers everything on the broadcast) */}
+      {scene && scene !== 'live' && <SceneOverlay scene={scene} />}
+
       {/* live badge + timer */}
       {live && (
         <div style={{ position: 'absolute', top: 16, left: 16, display: 'flex', alignItems: 'center', gap: 8, zIndex: 7 }}>
@@ -164,6 +168,42 @@ export function StreamPreview({
           </span>
         </div>
       )}
+    </div>
+  )
+}
+
+const SCENE_TEXT = {
+  starting: { title: 'Starting soon', sub: 'The live session will begin shortly' },
+  brb: { title: 'Be right back', sub: 'Stay tuned — back in a moment' },
+  ending: { title: 'Thanks for watching', sub: 'See you in the next session' }
+}
+
+/** Full-screen branded scene overlay (preview of Starting Soon / BRB / Ending). */
+function SceneOverlay({ scene }) {
+  const s = SCENE_TEXT[scene] || SCENE_TEXT.starting
+  return (
+    <div
+      style={{
+        position: 'absolute',
+        inset: 0,
+        zIndex: 8,
+        background: colors.dark,
+        display: 'grid',
+        placeItems: 'center',
+        textAlign: 'center'
+      }}
+    >
+      <div>
+        <div style={{ marginBottom: 18 }}>
+          <Star size={44} />
+        </div>
+        <div style={{ ...typography.display, fontSize: 34, color: '#fff' }}>{s.title}</div>
+        <div style={{ ...typography.body, color: 'rgba(255,255,255,0.6)', marginTop: 8 }}>{s.sub}</div>
+      </div>
+      <div style={{ position: 'absolute', bottom: 20, display: 'flex', alignItems: 'center', gap: 7 }}>
+        <Star size={13} />
+        <span style={{ fontWeight: 800, color: '#fff', fontSize: 14 }}>millimore</span>
+      </div>
     </div>
   )
 }

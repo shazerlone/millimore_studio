@@ -4,6 +4,7 @@ import { Sidebar } from '@components/Sidebar'
 import { ToastHost } from '@components/Toast'
 import { Login } from '@screens/Login'
 import { Onboarding } from '@screens/Onboarding'
+import { Monitor } from '@screens/Monitor'
 import { Dashboard } from '@screens/Dashboard'
 import { GoLive } from '@screens/GoLive'
 import { OverlayDesigner } from '@screens/OverlayDesigner'
@@ -40,6 +41,8 @@ export default function App() {
     <AppProvider>
       <HashRouter>
         <Routes>
+          {/* standalone floating monitor window — no auth/sidebar */}
+          <Route path="/monitor" element={<Monitor />} />
           <Route path="/login" element={<Login />} />
           <Route element={<RequireAuth />}>
             <Route path="/setup" element={<Onboarding />} />

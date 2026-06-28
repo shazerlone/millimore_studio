@@ -53,6 +53,10 @@ export function GoLive() {
   // camera preview stream (state so the preview re-renders on acquire)
   const [camStream, setCamStream] = useState(null)
 
+  // scene: live | starting | brb | ending
+  const [scene, setScene] = useState('live')
+  const [recordEnabled, setRecordEnabled] = useState(false)
+
   // modals / guide
   const [showPicker, setShowPicker] = useState(false)
   const [guidePlatform, setGuidePlatform] = useState(null)
@@ -70,8 +74,10 @@ export function GoLive() {
   // (config edits + the active trade) without restarting the stream.
   const overlayConfigRef = useRef(overlayConfig)
   const overlayTradeRef = useRef(null)
+  const sceneRef = useRef('live')
   overlayConfigRef.current = overlayConfig
   overlayTradeRef.current = overlayEnabled ? overlayTrade : null
+  sceneRef.current = scene
 
   // Load saved stream keys (decrypted in main via safeStorage).
   useEffect(() => {
@@ -169,8 +175,35 @@ export function GoLive() {
     bridge?.settings.set('goLiveGuideSeen', true)
   }
 
+  // ---- floating monitor sync ----
+  const lastTradeRef = useRef(null)
+  const actionsRef = useRef({})
+
+  // Push live state to the monitor window whenever it changes.
+  useEffect(() => {
+    bridge?.monitor.pushState({
+      live: isLive,
+      elapsed,
+      trade: overlayEnabled ? overlayTrade : null,
+      overlayConfig,
+      stats: streamStats
+    })
+  }, [bridge, isLive, elapsed, overlayTrade, overlayEnabled, overlayConfig, streamStats])
+
+  // Handle control commands coming back from the monitor window.
+  useEffect(() => {
+    if (!bridge) return
+    return bridge.monitor.onCommand((cmd) => {
+      const a = actionsRef.current
+      if (cmd.type === 'stop') a.stopStream?.()
+      else if (cmd.type === 'hideTrade') a.hideTradeCard?.()
+      else if (cmd.type === 'repeatTrade' && lastTradeRef.current) a.placeTrade?.(lastTradeRef.current)
+    })
+  }, [bridge])
+
   // ---- manual trade placement (drives the on-stream overlay card) ----
   const placeTrade = (trade) => {
+    lastTradeRef.current = trade
     clearTimeout(tradeHideTimer.current)
     setOverlayTrade({ ...trade, event: 'open', ts: Date.now() })
     // Auto-hide after the card's lifetime unless the trader hides it sooner.
@@ -272,19 +305,27 @@ export function GoLive() {
 
         compositor.current = new StreamCompositor({
           quality,
-          getOverlay: () => ({ config: overlayConfigRef.current, trade: overlayTradeRef.current })
+          getOverlay: () => ({
+            config: overlayConfigRef.current,
+            trade: overlayTradeRef.current,
+            scene: sceneRef.current
+          })
         })
         const { videoCopy } = await compositor.current.prepare(sourceId, cameraStream.current)
 
         // Start FFmpeg, then begin emitting chunks (so the WebM header isn't lost).
-        await bridge.stream.start({
+        const startRes = await bridge.stream.start({
           quality,
           destinations: dests,
           title,
           videoCopy,
+          record: recordEnabled,
           overlayRelayKey: keys.millimore || 'demo'
         })
         compositor.current.beginRecording(250)
+        if (startRes?.recordPath) {
+          pushToast(`Recording to ${startRes.recordPath}`, 'info', 6000)
+        }
       }
       setIsLive(true)
       startTimer()
@@ -331,6 +372,9 @@ export function GoLive() {
 
   const activeCount = DESTS.filter((d) => enabled[d.platform]).length
 
+  // Keep the monitor command handler pointed at the latest action closures.
+  actionsRef.current = { stopStream, hideTradeCard, placeTrade }
+
   return (
     <Page maxWidth={1320}>
       <PageHeader
@@ -364,6 +408,7 @@ export function GoLive() {
               screenRef={screenRef}
               hasScreen={hasScreen}
               hasCamera={hasCamera}
+              scene={scene}
               onCameraChange={(cam) => updateOverlay({ camera: cam })}
             />
           </div>
@@ -411,6 +456,15 @@ export function GoLive() {
               <Badge tone={hasCamera ? 'green' : 'amber'}>
                 <VideoIcon size={12} /> {hasCamera ? 'Camera on' : 'Camera off'}
               </Badge>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => bridge?.monitor.toggle(true)}
+                style={{ marginLeft: 'auto', color: colors.primary }}
+                title="Floating monitor — visible only to you, hidden from viewers"
+              >
+                ⤢ Pop-out monitor
+              </Button>
             </div>
 
             {/* device selection — applies live */}
@@ -550,6 +604,29 @@ export function GoLive() {
                   ))}
                 </div>
               </div>
+
+              {/* local recording */}
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 12,
+                  padding: 14,
+                  borderRadius: radius.card,
+                  background: colors.surfaceMuted
+                }}
+              >
+                <span style={{ color: colors.primary }}>
+                  <VideoIcon size={20} />
+                </span>
+                <div style={{ flex: 1 }}>
+                  <div style={{ ...typography.bodyStrong, color: colors.textPrimary }}>Record to my computer</div>
+                  <div style={{ ...typography.small, color: colors.textSecondary }}>
+                    Save a local copy (.mkv) to your Movies folder while you stream
+                  </div>
+                </div>
+                <Toggle checked={recordEnabled} onChange={setRecordEnabled} />
+              </div>
             </>
           ) : (
             <LiveSummary elapsed={elapsed} dests={DESTS.filter((d) => enabled[d.platform])} quality={quality} />
@@ -576,6 +653,35 @@ export function GoLive() {
               </div>
             </div>
             <Toggle checked={overlayEnabled} onChange={setOverlayEnabled} />
+          </div>
+
+          {/* scene switcher */}
+          <div>
+            <SubLabel>Scene</SubLabel>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+              {[
+                { id: 'live', label: 'Live' },
+                { id: 'starting', label: 'Starting soon' },
+                { id: 'brb', label: 'Be right back' },
+                { id: 'ending', label: 'Ending' }
+              ].map((s) => (
+                <button
+                  key={s.id}
+                  onClick={() => setScene(s.id)}
+                  style={{
+                    padding: '9px 10px',
+                    borderRadius: radius.button,
+                    border: `1px solid ${scene === s.id ? colors.primary : colors.borderStrong}`,
+                    background: scene === s.id ? colors.primarySoft : colors.surface,
+                    color: scene === s.id ? colors.primary : colors.textPrimary,
+                    fontWeight: 600,
+                    fontSize: 13
+                  }}
+                >
+                  {s.label}
+                </button>
+              ))}
+            </div>
           </div>
 
           {/* GO LIVE */}

@@ -16,6 +16,15 @@ export function paintOverlay(ctx, W, H, state, tMs) {
   if (!cfg) return
   const u = H / 1080 // scale unit relative to 1080p
 
+  // Full-screen scene (Starting Soon / BRB / Ending) covers everything.
+  if (state.scene && state.scene !== 'live') {
+    drawScene(ctx, W, H, u, state.scene)
+    if (cfg.watermark?.enabled) {
+      drawWatermark(ctx, W, H, u, { isRight: true, isBottom: true, pad: 28 * u, bottomInset: 28 * u, topInset: 28 * u }, cfg.watermark)
+    }
+    return
+  }
+
   let tickerH = 0
   if (cfg.ticker?.enabled) tickerH = drawTicker(ctx, W, H, u, cfg.ticker, tMs)
 
@@ -31,6 +40,60 @@ export function paintOverlay(ctx, W, H, state, tMs) {
   } else if (cfg.watermark?.enabled) {
     drawWatermark(ctx, W, H, u, { isRight, isBottom, pad, bottomInset, topInset }, cfg.watermark)
   }
+}
+
+/* ------------------------------------------------------------------ scenes */
+
+export const SCENES = {
+  starting: { title: 'Starting soon', sub: 'The live session will begin shortly' },
+  brb: { title: 'Be right back', sub: 'Stay tuned — back in a moment' },
+  ending: { title: 'Thanks for watching', sub: 'See you in the next session' }
+}
+
+function drawScene(ctx, W, H, u, scene) {
+  const s = SCENES[scene] || SCENES.starting
+  // full-bleed brand background
+  ctx.fillStyle = '#0B1220'
+  ctx.fillRect(0, 0, W, H)
+  // subtle grid
+  ctx.strokeStyle = 'rgba(255,255,255,0.03)'
+  ctx.lineWidth = 1
+  for (let x = 0; x < W; x += 64 * u) {
+    ctx.beginPath()
+    ctx.moveTo(x, 0)
+    ctx.lineTo(x, H)
+    ctx.stroke()
+  }
+  for (let y = 0; y < H; y += 64 * u) {
+    ctx.beginPath()
+    ctx.moveTo(0, y)
+    ctx.lineTo(W, y)
+    ctx.stroke()
+  }
+
+  const cx = W / 2
+  const cy = H / 2
+  drawStar(ctx, cx, cy - 120 * u, 46 * u, BLUE)
+
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  ctx.fillStyle = '#F8FAFC'
+  ctx.font = `800 ${64 * u}px Inter, sans-serif`
+  ctx.fillText(s.title, cx, cy + 10 * u)
+
+  ctx.fillStyle = '#94A3B8'
+  ctx.font = `500 ${24 * u}px Inter, sans-serif`
+  ctx.fillText(s.sub, cx, cy + 64 * u)
+
+  // wordmark bottom
+  ctx.fillStyle = '#F8FAFC'
+  ctx.font = `800 ${22 * u}px Inter, sans-serif`
+  const label = 'millimore'
+  const lw = ctx.measureText(label).width
+  drawStar(ctx, cx - lw / 2 - 16 * u, H - 60 * u, 9 * u, BLUE)
+  ctx.textAlign = 'left'
+  ctx.fillText(label, cx - lw / 2, H - 60 * u + 1 * u)
+  ctx.textAlign = 'left'
 }
 
 /* --------------------------------------------------------------- primitives */

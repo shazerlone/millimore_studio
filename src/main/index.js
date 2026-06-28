@@ -34,6 +34,73 @@ const overlay = new OverlayManager()
 
 let mainWindow = null
 
+// ---- floating, capture-protected stream monitor ------------------------
+
+let monitorWin = null
+let streaming = false
+let monitorAuto = true // auto show/hide the monitor when the main app loses focus
+
+function createMonitorWindow() {
+  if (monitorWin && !monitorWin.isDestroyed()) return monitorWin
+
+  const { workArea } = require('electron').screen.getPrimaryDisplay()
+  const w = 320
+  const h = 460
+  monitorWin = new BrowserWindow({
+    width: w,
+    height: h,
+    x: workArea.x + workArea.width - w - 24,
+    y: workArea.y + 24,
+    frame: false,
+    resizable: true,
+    minWidth: 240,
+    minHeight: 320,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    fullscreenable: false,
+    backgroundColor: '#0B1220',
+    show: false,
+    webPreferences: {
+      preload: join(__dirname, '../preload/index.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+      backgroundThrottling: false
+    }
+  })
+
+  // Float above everything, including fullscreen apps, on every Space.
+  monitorWin.setAlwaysOnTop(true, 'screen-saver')
+  monitorWin.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+  // THE key bit: exclude this window from screen capture, so the trader sees it
+  // but viewers never do (even though it floats over the shared screen).
+  monitorWin.setContentProtection(true)
+
+  if (process.env.ELECTRON_RENDERER_URL) {
+    monitorWin.loadURL(`${process.env.ELECTRON_RENDERER_URL}#/monitor`)
+  } else {
+    monitorWin.loadFile(join(__dirname, '../renderer/index.html'), { hash: 'monitor' })
+  }
+
+  monitorWin.on('closed', () => {
+    monitorWin = null
+  })
+  return monitorWin
+}
+
+function showMonitor() {
+  const win = createMonitorWindow()
+  if (win.webContents.isLoading()) {
+    win.webContents.once('did-finish-load', () => win.showInactive())
+  } else {
+    win.showInactive()
+  }
+}
+
+function hideMonitor() {
+  if (monitorWin && !monitorWin.isDestroyed()) monitorWin.hide()
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1440,
@@ -54,6 +121,14 @@ function createWindow() {
   })
 
   mainWindow.once('ready-to-show', () => mainWindow.show())
+
+  // Auto show/hide the floating monitor when the trader switches apps mid-stream.
+  mainWindow.on('blur', () => {
+    if (streaming && monitorAuto) showMonitor()
+  })
+  mainWindow.on('focus', () => {
+    if (monitorAuto) hideMonitor()
+  })
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url)
@@ -213,7 +288,14 @@ ipcMain.handle('app:moveToApplications', () => {
 
 ipcMain.handle('stream:start', (_e, config) => {
   if (config?.overlayRelayKey) overlay.connectRelay(config.overlayRelayKey)
+  // Resolve a local recording path (renderer just asks for record: true).
+  if (config?.record) {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+    config.recordPath = join(app.getPath('videos'), `Millimore-${stamp}.mkv`)
+  }
   const result = engine.start(config)
+  result.recordPath = config?.recordPath || null
+  streaming = true
   // Prevent display/app sleep while live.
   if (powerBlockerId === null || !powerSaveBlocker.isStarted(powerBlockerId)) {
     powerBlockerId = powerSaveBlocker.start('prevent-display-sleep')
@@ -222,11 +304,37 @@ ipcMain.handle('stream:start', (_e, config) => {
 })
 ipcMain.handle('stream:stop', () => {
   overlay.disconnectRelay()
+  streaming = false
+  hideMonitor()
   if (powerBlockerId !== null && powerSaveBlocker.isStarted(powerBlockerId)) {
     powerSaveBlocker.stop(powerBlockerId)
     powerBlockerId = null
   }
   return engine.stop()
+})
+
+// ---- IPC: floating monitor --------------------------------------------
+
+ipcMain.handle('monitor:toggle', (_e, on) => {
+  if (on) showMonitor()
+  else hideMonitor()
+  return { ok: true }
+})
+ipcMain.handle('monitor:setAuto', (_e, value) => {
+  monitorAuto = !!value
+  return { ok: true }
+})
+// Main window pushes live state → forward to the monitor window.
+ipcMain.on('monitor:state', (_e, state) => {
+  if (monitorWin && !monitorWin.isDestroyed()) {
+    monitorWin.webContents.send('monitor:state:update', state)
+  }
+})
+// Monitor window issues a control command → forward to the main window.
+ipcMain.on('monitor:command', (_e, cmd) => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('monitor:command:relay', cmd)
+  }
 })
 ipcMain.on('stream:chunk', (_e, buffer) => engine.pushChunk(buffer))
 ipcMain.handle('stream:testSpeed', () => testConnectionSpeed())

@@ -87,7 +87,13 @@ export class MultistreamEngine extends EventEmitter {
     const config = this.config
     const preset = QUALITY_PRESETS[config.quality] || QUALITY_PRESETS['1080p30']
     const targets = this._buildTargets(config.destinations)
-    const teeOutput = targets.map((url) => `[f=flv:onfail=ignore]${url}`).join('|')
+    let teeOutput = targets.map((url) => `[f=flv:onfail=ignore]${url}`).join('|')
+    // Optional local recording: a robust Matroska file branch that survives an
+    // abrupt stop (unlike MP4, which needs a clean finalize).
+    if (config.recordPath) {
+      const rec = config.recordPath.replace(/\\/g, '/').replace(/:/g, '\\:')
+      teeOutput += `|[f=matroska]${rec}`
+    }
 
     // Always re-encode (never stream-copy). The renderer's MediaRecorder WebM
     // has irregular keyframes and timestamps that RTMP/YouTube reject, causing
