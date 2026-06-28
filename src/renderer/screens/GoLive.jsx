@@ -319,19 +319,20 @@ export function GoLive() {
           }),
           onThumbnail: (url) => bridge.monitor.pushPreview(url)
         })
-        const { videoCopy } = await compositor.current.prepare(cameraStream.current)
+        const { mode, audio } = await compositor.current.prepare(cameraStream.current)
         if (screenSource?.id) await compositor.current.setScreenSource(screenSource.id)
 
-        // Start FFmpeg, then begin emitting chunks (so the WebM header isn't lost).
+        // Start FFmpeg first, then begin emitting encoded frames.
         const startRes = await bridge.stream.start({
           quality,
           destinations: dests,
           title,
-          videoCopy,
+          mode,
+          audio,
           record: recordEnabled,
           overlayRelayKey: keys.millimore || 'demo'
         })
-        compositor.current.beginRecording(120)
+        compositor.current.beginRecording()
         if (startRes?.recordPath) {
           pushToast(`Recording to ${startRes.recordPath}`, 'info', 6000)
         }

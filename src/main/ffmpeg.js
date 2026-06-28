@@ -95,64 +95,64 @@ export class MultistreamEngine extends EventEmitter {
       teeOutput += `|[f=matroska]${rec}`
     }
 
-    // Always re-encode (never stream-copy): the renderer's MediaRecorder WebM has
-    // irregular keyframes/timestamps that RTMP rejects ("No data"). Re-encoding
-    // with a fixed 2s GOP and constant frame rate gives a continuous feed.
-    // On macOS use the hardware encoder (VideoToolbox) so it's fast and low-CPU
-    // like OBS; fall back to libx264 elsewhere.
     const fps = preset.fps
-    const videoArgs =
-      process.platform === 'darwin'
-        ? [
-            '-c:v', 'h264_videotoolbox',
-            '-realtime', '1',
-            '-allow_sw', '1',
-            '-profile:v', 'high',
-            '-pix_fmt', 'yuv420p',
-            '-r', String(fps),
-            '-g', String(fps * 2),
-            '-b:v', preset.videoBitrate,
-            '-maxrate', preset.videoBitrate,
-            '-bufsize', preset.bufSize
-          ]
-        : [
-            '-c:v', 'libx264',
-            '-preset', 'veryfast',
-            '-tune', 'zerolatency',
-            '-profile:v', 'high',
-            '-pix_fmt', 'yuv420p',
-            '-r', String(fps),
-            '-vsync', 'cfr',
-            '-g', String(fps * 2),
-            '-keyint_min', String(fps),
-            '-sc_threshold', '0',
-            '-b:v', preset.videoBitrate,
-            '-maxrate', preset.videoBitrate,
-            '-bufsize', preset.bufSize
-          ]
+    const webcodecs = config.mode === 'webcodecs'
+    const hasAudioPipe = webcodecs && config.audio
+    let args
 
-    const args = [
-      '-thread_queue_size', '512',
-      '-fflags', '+genpts',
-      '-use_wallclock_as_timestamps', '1',
-      '-i', 'pipe:0',
-      ...videoArgs,
-      // ---- audio (RTMP needs AAC; MediaRecorder gives Opus) ----
-      '-c:a', 'aac',
-      '-b:a', preset.audioBitrate,
-      '-ar', '44100',
-      '-flush_packets', '1',
-      // ---- fan-out to every destination ----
-      '-f', 'tee',
-      '-map', '0:v:0',
-      '-map', '0:a:0?',
-      teeOutput
-    ]
+    if (webcodecs) {
+      // OBS-style single encode: the renderer already hardware-encoded H.264 with
+      // a fixed 2s GOP and CBR, so FFmpeg just COPIES the video (no re-encode) and
+      // turns the raw mic PCM (fd 3) into AAC. Fast, steady bitrate, real audio.
+      const audioInput = hasAudioPipe
+        ? ['-thread_queue_size', '512', '-f', 's16le', '-ar', '48000', '-ac', '2', '-i', 'pipe:3']
+        : ['-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000']
+      args = [
+        '-thread_queue_size', '512',
+        '-fflags', '+genpts',
+        '-f', 'h264',
+        '-framerate', String(fps),
+        '-i', 'pipe:0',
+        ...audioInput,
+        '-c:v', 'copy',
+        '-c:a', 'aac',
+        '-b:a', preset.audioBitrate,
+        '-ar', '44100',
+        '-flush_packets', '1',
+        '-f', 'tee',
+        '-map', '0:v:0',
+        '-map', '1:a:0',
+        teeOutput
+      ]
+    } else {
+      // Fallback: transcode the renderer's WebM (HW encoder on macOS, x264 else).
+      const videoArgs =
+        process.platform === 'darwin'
+          ? ['-c:v', 'h264_videotoolbox', '-realtime', '1', '-allow_sw', '1', '-profile:v', 'high', '-pix_fmt', 'yuv420p', '-r', String(fps), '-g', String(fps * 2), '-b:v', preset.videoBitrate, '-maxrate', preset.videoBitrate, '-bufsize', preset.bufSize]
+          : ['-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'zerolatency', '-profile:v', 'high', '-pix_fmt', 'yuv420p', '-r', String(fps), '-vsync', 'cfr', '-g', String(fps * 2), '-keyint_min', String(fps), '-sc_threshold', '0', '-b:v', preset.videoBitrate, '-maxrate', preset.videoBitrate, '-bufsize', preset.bufSize]
+      args = [
+        '-thread_queue_size', '512',
+        '-fflags', '+genpts',
+        '-use_wallclock_as_timestamps', '1',
+        '-i', 'pipe:0',
+        ...videoArgs,
+        '-c:a', 'aac',
+        '-b:a', preset.audioBitrate,
+        '-ar', '44100',
+        '-flush_packets', '1',
+        '-f', 'tee',
+        '-map', '0:v:0',
+        '-map', '0:a:0?',
+        teeOutput
+      ]
+    }
 
-    this.proc = spawn(FFMPEG_PATH, args, { stdio: ['pipe', 'pipe', 'pipe'] })
+    const stdio = hasAudioPipe ? ['pipe', 'pipe', 'pipe', 'pipe'] : ['pipe', 'pipe', 'pipe']
+    this.proc = spawn(FFMPEG_PATH, args, { stdio })
     // Swallow EPIPE: when FFmpeg exits, in-flight chunk writes would otherwise
     // throw an uncaught exception and crash the main process.
     this.proc.stdin.on('error', () => {})
+    if (this.proc.stdio[3]) this.proc.stdio[3].on('error', () => {})
     this.proc.stderr.on('data', (chunk) => this._parseStats(chunk.toString()))
     this.proc.on('error', (err) => this.emit('status', { state: 'error', message: err.message }))
     this.proc.on('close', (code) => this._onClose(code))
@@ -172,12 +172,24 @@ export class MultistreamEngine extends EventEmitter {
     }
   }
 
-  /** Write a WebM chunk from the renderer's MediaRecorder to FFmpeg's stdin. */
+  /** Write an encoded video chunk (H.264 in WebCodecs mode, WebM in fallback). */
   pushChunk(buffer) {
     const stdin = this.proc?.stdin
     if (this.live && stdin && stdin.writable) {
       try {
         stdin.write(Buffer.from(buffer))
+      } catch {
+        /* EPIPE on shutdown — ignore */
+      }
+    }
+  }
+
+  /** Write raw s16le stereo mic PCM to FFmpeg's fd 3 (WebCodecs mode). */
+  pushAudio(buffer) {
+    const pipe = this.proc?.stdio?.[3]
+    if (this.live && pipe && pipe.writable) {
+      try {
+        pipe.write(Buffer.from(buffer))
       } catch {
         /* EPIPE on shutdown — ignore */
       }

@@ -428,6 +428,7 @@ ipcMain.on('monitor:command', (_e, cmd) => {
   }
 })
 ipcMain.on('stream:chunk', (_e, buffer) => engine.pushChunk(buffer))
+ipcMain.on('stream:audio', (_e, buffer) => engine.pushAudio(buffer))
 ipcMain.handle('stream:testSpeed', () => testConnectionSpeed())
 
 // ---- IPC: MT5 ----------------------------------------------------------

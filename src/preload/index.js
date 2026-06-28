@@ -39,6 +39,7 @@ const api = {
     start: (config) => ipcRenderer.invoke('stream:start', config),
     stop: () => ipcRenderer.invoke('stream:stop'),
     pushChunk: (buffer) => ipcRenderer.send('stream:chunk', buffer),
+    pushAudio: (buffer) => ipcRenderer.send('stream:audio', buffer),
     testSpeed: () => ipcRenderer.invoke('stream:testSpeed'),
     onStatus: (cb) => subscribe('stream:status', cb),
     onStats: (cb) => subscribe('stream:stats', cb)

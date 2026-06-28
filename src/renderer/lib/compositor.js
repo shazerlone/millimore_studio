@@ -3,16 +3,15 @@ import { paintOverlay } from './overlayPainter'
 
 const BITRATES = { '720p30': 3_500_000, '1080p30': 6_000_000, '1080p60': 9_000_000 }
 
-// Every preferred type includes an audio codec (opus) — a video-only MIME would
-// silently drop the microphone, which is exactly what broke YouTube audio.
-// H.264 first so MediaRecorder uses the Mac's hardware encoder (light CPU).
-const MIME_PREFS = [
-  'video/webm;codecs=h264,opus',
-  'video/x-matroska;codecs=avc1,opus',
-  'video/webm;codecs=vp8,opus',
-  'video/webm;codecs=vp9,opus',
-  'video/webm'
-]
+// H.264 codec strings (constrained baseline — low-latency, widely accepted).
+const AVC_CODEC = {
+  '720p30': 'avc1.42E01F', // level 3.1
+  '1080p30': 'avc1.42E028', // level 4.0
+  '1080p60': 'avc1.42E02A' // level 4.2
+}
+
+// MediaRecorder fallback (only if WebCodecs is unavailable). Always audio-inclusive.
+const MIME_PREFS = ['video/webm;codecs=vp8,opus', 'video/webm;codecs=vp9,opus', 'video/webm']
 
 function pickMime() {
   if (typeof MediaRecorder === 'undefined') return ''
@@ -27,29 +26,33 @@ function pickMime() {
 }
 
 /**
- * StreamCompositor draws the scene (camera-only, or screen + camera PiP) plus the
- * Millimore overlay into a canvas, captures it as a MediaStream and encodes it
- * with MediaRecorder. What's drawn matches the in-app preview exactly:
- *   - no screen shared  → the camera fills the frame
- *   - screen shared     → screen is the base layer, camera is a shaped PiP
- * The screen source can be set/changed/cleared live without restarting.
+ * StreamCompositor composites the scene (camera-only, or screen + camera PiP) and
+ * the overlay onto a canvas, then encodes it ONCE.
+ *
+ * Primary path (OBS-style): WebCodecs VideoEncoder hardware-encodes the canvas to
+ * H.264 with a fixed keyframe interval and constant bitrate; the microphone is
+ * captured as raw PCM. FFmpeg only *copies* the video and encodes audio to AAC —
+ * no video re-encode, so it's fast and the bitrate stays healthy.
+ *
+ * Fallback path: MediaRecorder → WebM → FFmpeg transcode (older runtimes).
  */
 export class StreamCompositor {
   constructor({ quality = '1080p30', getOverlay = null, onThumbnail = null } = {}) {
     const dims = QUALITY_DIMS[quality] || QUALITY_DIMS['1080p30']
+    this.quality = quality
     this.width = dims.width
     this.height = dims.height
     this.fps = dims.fps
     this.bitrate = BITRATES[quality] || 6_000_000
     this.getOverlay = getOverlay
     this.onThumbnail = onThumbnail
+    this.useWebCodecs = typeof window !== 'undefined' && typeof window.VideoEncoder !== 'undefined'
 
     this.canvas = document.createElement('canvas')
     this.canvas.width = this.width
     this.canvas.height = this.height
     this.ctx = this.canvas.getContext('2d', { alpha: false, desynchronized: true })
 
-    // Small offscreen canvas for the monitor preview thumbnail.
     this.thumb = document.createElement('canvas')
     this.thumb.width = 320
     this.thumb.height = 180
@@ -63,43 +66,31 @@ export class StreamCompositor {
     this.hasScreen = false
     this._timer = null
     this._thumbTimer = null
-    this._thumbEnabled = false // only emit thumbnails while the monitor is open
+    this._thumbEnabled = false
     this._running = false
+    this._encoding = false
+    this._frameIndex = 0
+
+    // encoders
+    this.videoEncoder = null
     this.recorder = null
-    this._videoCopy = false
+    this.audioCtx = null
+    this.audioNode = null
   }
 
-  /** Enable/disable the monitor preview thumbnail (saves CPU when monitor closed). */
   setThumbnailEnabled(on) {
     this._thumbEnabled = !!on
   }
 
-  /** Set up the camera + canvas capture + recorder. Screen is optional/added later. */
+  /** Set up camera + canvas loop + the encoder. Returns the chosen mode. */
   async prepare(cameraStream) {
+    this.cameraStream = cameraStream || null
     if (cameraStream) {
       this.cameraVideo.srcObject = cameraStream
       await this.cameraVideo.play().catch(() => {})
     }
-
     this._running = true
     this._loop()
-
-    this.outStream = this.canvas.captureStream(this.fps)
-    const micTrack = cameraStream?.getAudioTracks?.()[0]
-    if (micTrack) this.outStream.addTrack(micTrack)
-
-    const mime = pickMime()
-    this._videoCopy = mime.includes('h264') || mime.includes('avc1')
-    this.recorder = new MediaRecorder(this.outStream, {
-      mimeType: mime || undefined,
-      videoBitsPerSecond: this.bitrate,
-      audioBitsPerSecond: 160_000
-    })
-    this.recorder.ondataavailable = (e) => {
-      if (e.data && e.data.size > 0) {
-        e.data.arrayBuffer().then((buf) => window.millimore?.stream.pushChunk(buf))
-      }
-    }
 
     if (this.onThumbnail) {
       this._thumbTimer = setInterval(() => {
@@ -107,17 +98,104 @@ export class StreamCompositor {
       }, 500)
     }
 
-    return { videoCopy: this._videoCopy, mime }
+    const hasAudio = !!cameraStream?.getAudioTracks?.().length
+    if (this.useWebCodecs) {
+      try {
+        this._setupVideoEncoder()
+        return { mode: 'webcodecs', audio: hasAudio }
+      } catch (err) {
+        console.error('WebCodecs unavailable, falling back to MediaRecorder:', err)
+        this.useWebCodecs = false
+      }
+    }
+    this._setupRecorder(cameraStream)
+    return { mode: 'mediarecorder', audio: hasAudio }
   }
 
-  /** Acquire / replace / clear the screen source — works live. */
+  _setupVideoEncoder() {
+    const codec = AVC_CODEC[this.quality] || AVC_CODEC['1080p30']
+    this.videoEncoder = new VideoEncoder({
+      output: (chunk) => {
+        const buf = new ArrayBuffer(chunk.byteLength)
+        chunk.copyTo(buf)
+        window.millimore?.stream.pushChunk(buf)
+      },
+      error: (e) => console.error('VideoEncoder error:', e)
+    })
+    this.videoEncoder.configure({
+      codec,
+      width: this.width,
+      height: this.height,
+      framerate: this.fps,
+      bitrate: this.bitrate,
+      bitrateMode: 'constant',
+      latencyMode: 'realtime',
+      avc: { format: 'annexb' }
+    })
+  }
+
+  _setupRecorder(cameraStream) {
+    this.outStream = this.canvas.captureStream(this.fps)
+    const micTrack = cameraStream?.getAudioTracks?.()[0]
+    if (micTrack) this.outStream.addTrack(micTrack)
+    const mime = pickMime()
+    this.recorder = new MediaRecorder(this.outStream, {
+      mimeType: mime || undefined,
+      videoBitsPerSecond: this.bitrate,
+      audioBitsPerSecond: 160_000
+    })
+    this.recorder.ondataavailable = (e) => {
+      if (e.data && e.data.size > 0) e.data.arrayBuffer().then((b) => window.millimore?.stream.pushChunk(b))
+    }
+  }
+
+  /** Begin emitting encoded data (call once FFmpeg is ready). */
+  beginRecording(timesliceMs = 200) {
+    if (this.useWebCodecs) {
+      this._encoding = true
+      this._startAudioPCM()
+    } else if (this.recorder && this.recorder.state === 'inactive') {
+      this.recorder.start(timesliceMs)
+    }
+  }
+
+  /** Capture the microphone as 48kHz stereo s16le PCM for FFmpeg (fd 3). */
+  _startAudioPCM() {
+    const track = this.cameraStream?.getAudioTracks?.()[0]
+    if (!track) return
+    try {
+      this.audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 })
+      const src = this.audioCtx.createMediaStreamSource(new MediaStream([track]))
+      const node = this.audioCtx.createScriptProcessor(2048, 1, 1)
+      node.onaudioprocess = (e) => {
+        if (!this._encoding) return
+        const input = e.inputBuffer.getChannelData(0)
+        const pcm = new Int16Array(input.length * 2)
+        for (let i = 0; i < input.length; i++) {
+          let s = Math.max(-1, Math.min(1, input[i]))
+          s = s < 0 ? s * 0x8000 : s * 0x7fff
+          pcm[i * 2] = s
+          pcm[i * 2 + 1] = s
+        }
+        window.millimore?.stream.pushAudio(pcm.buffer)
+      }
+      const sink = this.audioCtx.createGain()
+      sink.gain.value = 0
+      src.connect(node)
+      node.connect(sink)
+      sink.connect(this.audioCtx.destination)
+      this.audioNode = node
+    } catch (err) {
+      console.error('Audio capture error:', err)
+    }
+  }
+
   async setScreenSource(sourceId) {
     this.screenStream?.getTracks().forEach((t) => t.stop())
     this.screenStream = null
     this.screenVideo.srcObject = null
     this.hasScreen = false
     if (!sourceId) return
-
     this.screenStream = await navigator.mediaDevices.getUserMedia({
       audio: false,
       video: {
@@ -135,22 +213,37 @@ export class StreamCompositor {
     this.hasScreen = true
   }
 
-  /** Swap the camera stream live (e.g. device change). */
   setCameraStream(cameraStream) {
     if (!cameraStream) return
+    this.cameraStream = cameraStream
     this.cameraVideo.srcObject = cameraStream
     this.cameraVideo.play().catch(() => {})
-  }
-
-  beginRecording(timesliceMs = 250) {
-    if (this.recorder && this.recorder.state === 'inactive') this.recorder.start(timesliceMs)
   }
 
   _loop() {
     const frameMs = 1000 / this.fps
     this._timer = setInterval(() => {
-      if (this._running) this._drawFrame()
+      if (!this._running) return
+      this._drawFrame()
+      if (this._encoding && this.videoEncoder) this._encodeFrame()
     }, frameMs)
+  }
+
+  _encodeFrame() {
+    // Drop frames if the encoder is backed up (keeps latency/memory in check).
+    if (this.videoEncoder.encodeQueueSize > 2) return
+    let frame
+    try {
+      const ts = Math.round((this._frameIndex * 1e6) / this.fps)
+      frame = new VideoFrame(this.canvas, { timestamp: ts })
+      const keyFrame = this._frameIndex % (this.fps * 2) === 0 // 2s GOP
+      this.videoEncoder.encode(frame, { keyFrame })
+      this._frameIndex++
+    } catch (err) {
+      console.error('encodeFrame error:', err)
+    } finally {
+      if (frame) frame.close()
+    }
   }
 
   _drawFrame() {
@@ -159,13 +252,10 @@ export class StreamCompositor {
     ctx.fillRect(0, 0, width, height)
 
     const screenReady = this.hasScreen && this.screenVideo.readyState >= 2
-
     if (screenReady) {
-      // screen base (contain to avoid distortion) + camera PiP
       drawContain(ctx, this.screenVideo, 0, 0, width, height)
       if (this.cameraVideo.readyState >= 2) this._drawCameraPiP()
     } else if (this.cameraVideo.readyState >= 2) {
-      // camera-only: fill the frame (matches the preview)
       drawCover(ctx, this.cameraVideo, 0, 0, width, height)
     }
 
@@ -217,14 +307,29 @@ export class StreamCompositor {
     }
   }
 
-  stop() {
+  async stop() {
     this._running = false
+    this._encoding = false
     if (this._timer) clearInterval(this._timer)
     if (this._thumbTimer) clearInterval(this._thumbTimer)
     try {
+      if (this.videoEncoder && this.videoEncoder.state !== 'closed') {
+        await this.videoEncoder.flush().catch(() => {})
+        this.videoEncoder.close()
+      }
+    } catch {
+      /* ignore */
+    }
+    try {
       if (this.recorder && this.recorder.state !== 'inactive') this.recorder.stop()
     } catch {
-      /* already stopped */
+      /* ignore */
+    }
+    try {
+      this.audioNode?.disconnect()
+      await this.audioCtx?.close()
+    } catch {
+      /* ignore */
     }
     this.screenStream?.getTracks().forEach((t) => t.stop())
     this.outStream?.getVideoTracks().forEach((t) => t.stop())
@@ -243,7 +348,6 @@ function roundRect(ctx, x, y, w, h, r) {
   ctx.closePath()
 }
 
-/** object-fit: cover (center-crop). */
 function drawCover(ctx, video, dx, dy, dw, dh) {
   const vw = video.videoWidth
   const vh = video.videoHeight
@@ -254,12 +358,9 @@ function drawCover(ctx, video, dx, dy, dw, dh) {
   const scale = Math.max(dw / vw, dh / vh)
   const sw = dw / scale
   const sh = dh / scale
-  const sx = (vw - sw) / 2
-  const sy = (vh - sh) / 2
-  ctx.drawImage(video, sx, sy, sw, sh, dx, dy, dw, dh)
+  ctx.drawImage(video, (vw - sw) / 2, (vh - sh) / 2, sw, sh, dx, dy, dw, dh)
 }
 
-/** object-fit: contain (letterbox), so a captured screen isn't distorted. */
 function drawContain(ctx, video, dx, dy, dw, dh) {
   const vw = video.videoWidth
   const vh = video.videoHeight
