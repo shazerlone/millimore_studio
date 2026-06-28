@@ -63,9 +63,15 @@ export class StreamCompositor {
     this.hasScreen = false
     this._timer = null
     this._thumbTimer = null
+    this._thumbEnabled = false // only emit thumbnails while the monitor is open
     this._running = false
     this.recorder = null
     this._videoCopy = false
+  }
+
+  /** Enable/disable the monitor preview thumbnail (saves CPU when monitor closed). */
+  setThumbnailEnabled(on) {
+    this._thumbEnabled = !!on
   }
 
   /** Set up the camera + canvas capture + recorder. Screen is optional/added later. */
@@ -96,7 +102,9 @@ export class StreamCompositor {
     }
 
     if (this.onThumbnail) {
-      this._thumbTimer = setInterval(() => this._emitThumb(), 500)
+      this._thumbTimer = setInterval(() => {
+        if (this._thumbEnabled) this._emitThumb()
+      }, 500)
     }
 
     return { videoCopy: this._videoCopy, mime }

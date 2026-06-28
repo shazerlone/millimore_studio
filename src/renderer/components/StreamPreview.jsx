@@ -21,7 +21,7 @@ export function StreamPreview({
   overlayTrade = null,
   overlayConfig = {},
   cameraStream = null,
-  screenRef = null,
+  screenStream = null,
   hasScreen = false,
   hasCamera = true,
   scene = 'live',
@@ -30,6 +30,7 @@ export function StreamPreview({
 }) {
   const containerRef = useRef(null)
   const mainCamRef = useRef(null)
+  const screenVideoRef = useRef(null)
 
   const {
     position = 'bottom-left',
@@ -48,6 +49,14 @@ export function StreamPreview({
       mainCamRef.current.srcObject = cameraStream
     }
   }, [hasScreen, cameraStream])
+
+  // Attach the screen stream once the screen video has mounted (avoids a black
+  // preview from assigning srcObject before the element exists).
+  useEffect(() => {
+    if (hasScreen && screenVideoRef.current && screenStream) {
+      screenVideoRef.current.srcObject = screenStream
+    }
+  }, [hasScreen, screenStream])
 
   const corner = {
     'top-left': { top: 16, left: 16 },
@@ -72,7 +81,7 @@ export function StreamPreview({
       {/* base layer */}
       {hasScreen ? (
         <video
-          ref={screenRef}
+          ref={screenVideoRef}
           autoPlay
           muted
           playsInline

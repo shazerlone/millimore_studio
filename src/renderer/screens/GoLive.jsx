@@ -50,8 +50,9 @@ export function GoLive() {
   // connection health
   const [health, setHealth] = useState(null) // { state, ... }
 
-  // camera preview stream (state so the preview re-renders on acquire)
+  // preview streams (state so the preview re-renders + attaches on mount)
   const [camStream, setCamStream] = useState(null)
+  const [screenStreamState, setScreenStreamState] = useState(null)
 
   // scene: live | starting | brb | ending
   const [scene, setScene] = useState('live')
@@ -62,7 +63,6 @@ export function GoLive() {
   const [guidePlatform, setGuidePlatform] = useState(null)
   const [showGuide, setShowGuide] = useState(false)
 
-  const screenRef = useRef(null)
   const cameraStream = useRef(null)
   const screenStream = useRef(null)
   const compositor = useRef(null)
@@ -151,7 +151,10 @@ export function GoLive() {
     return bridge.stream.onStatus((s) => {
       setHealth(s)
       if (s.state === 'unstable' && s.recommend) setQuality(s.recommend)
-      if (s.state === 'failed') pushToast(s.message || 'Stream dropped and could not reconnect.', 'error', 8000)
+      if (s.state === 'failed') {
+        pushToast(s.message || 'Stream dropped and could not reconnect.', 'error', 8000)
+        actionsRef.current.stopStream?.() // clean up the UI/compositor
+      }
       if (s.state === 'error') pushToast(s.message || 'Streaming error.', 'error', 8000)
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -190,6 +193,12 @@ export function GoLive() {
       stats: streamStats
     })
   }, [bridge, isLive, elapsed, overlayTrade, overlayEnabled, overlayConfig, streamStats])
+
+  // Only render the monitor preview thumbnail while the monitor is open.
+  useEffect(() => {
+    if (!bridge) return
+    return bridge.monitor.onVisible((v) => compositor.current?.setThumbnailEnabled(v))
+  }, [bridge])
 
   // Handle control commands coming back from the monitor window.
   useEffect(() => {
@@ -239,7 +248,7 @@ export function GoLive() {
         }
       })
       screenStream.current = stream
-      if (screenRef.current) screenRef.current.srcObject = stream
+      setScreenStreamState(stream)
       setScreenSource(source)
       setHasScreen(true)
       setCaptureError(null)
@@ -254,7 +263,7 @@ export function GoLive() {
   const stopSharing = () => {
     screenStream.current?.getTracks().forEach((t) => t.stop())
     screenStream.current = null
-    if (screenRef.current) screenRef.current.srcObject = null
+    setScreenStreamState(null)
     setScreenSource(null)
     setHasScreen(false)
     // Live: drop back to camera-only on the broadcast too.
@@ -405,7 +414,7 @@ export function GoLive() {
               overlayTrade={overlayEnabled ? overlayTrade : null}
               overlayConfig={overlayConfig}
               cameraStream={camStream}
-              screenRef={screenRef}
+              screenStream={screenStreamState}
               hasScreen={hasScreen}
               hasCamera={hasCamera}
               scene={scene}

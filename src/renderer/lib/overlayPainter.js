@@ -150,10 +150,16 @@ function drawTicker(ctx, W, H, u, ticker, tMs) {
   const gap = 36 * u
   const star = 9 * u
 
-  // Build one logical sequence and measure it.
-  const measure = (txt) => ctx.measureText(txt).width
-  let seqWidth = 0
-  for (const it of items) seqWidth += measure(it.text) + gap + star * 3
+  // Measure once and cache — measureText every frame is a real CPU cost.
+  const sig = `${fontPx}|${items.map((i) => i.text).join('§')}`
+  if (_tickerCache.sig !== sig) {
+    const widths = items.map((it) => ctx.measureText(it.text).width)
+    _tickerCache.sig = sig
+    _tickerCache.widths = widths
+    _tickerCache.seqWidth = widths.reduce((n, w) => n + w + gap + star * 3, 0)
+  }
+  const widths = _tickerCache.widths
+  const seqWidth = _tickerCache.seqWidth
   if (seqWidth <= 0) {
     ctx.restore()
     return barH
@@ -168,20 +174,22 @@ function drawTicker(ctx, W, H, u, ticker, tMs) {
   const cy = y + barH / 2
   for (let c = 0; c < copies; c++) {
     let cx = x + c * seqWidth
-    for (const it of items) {
+    items.forEach((it, idx) => {
       const disc = it.type === 'disclaimer'
       ctx.fillStyle = dark ? (disc ? 'rgba(248,250,252,0.85)' : '#F8FAFC') : '#0F172A'
       ctx.font = `${disc ? 500 : 700} ${fontPx}px Inter, sans-serif`
       ctx.textAlign = 'left'
       ctx.fillText(it.text, cx, cy)
-      cx += measure(it.text) + gap
+      cx += widths[idx] + gap
       drawStar(ctx, cx, cy, star, BLUE)
       cx += star * 3
-    }
+    })
   }
   ctx.restore()
   return barH
 }
+
+const _tickerCache = { sig: '', widths: [], seqWidth: 0 }
 
 /* --------------------------------------------------------------- watermark */
 

@@ -106,6 +106,7 @@ function peekMonitor() {
   const place = () => {
     positionMonitorUnderTray()
     win.showInactive()
+    notifyMonitorVisible(true)
   }
   if (win.webContents.isLoading()) win.webContents.once('did-finish-load', place)
   else place()
@@ -167,15 +168,23 @@ function createMonitorWindow() {
 
 function showMonitor() {
   const win = createMonitorWindow()
-  if (win.webContents.isLoading()) {
-    win.webContents.once('did-finish-load', () => win.showInactive())
-  } else {
+  const show = () => {
     win.showInactive()
+    notifyMonitorVisible(true)
   }
+  if (win.webContents.isLoading()) win.webContents.once('did-finish-load', show)
+  else show()
 }
 
 function hideMonitor() {
   if (monitorWin && !monitorWin.isDestroyed()) monitorWin.hide()
+  notifyMonitorVisible(false)
+}
+
+function notifyMonitorVisible(visible) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('monitor:visible', visible)
+  }
 }
 
 function createWindow() {
