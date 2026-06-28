@@ -3,12 +3,14 @@ import { paintOverlay } from './overlayPainter'
 
 const BITRATES = { '720p30': 3_500_000, '1080p30': 6_000_000, '1080p60': 9_000_000 }
 
+// Every preferred type includes an audio codec (opus) — a video-only MIME would
+// silently drop the microphone, which is exactly what broke YouTube audio.
+// H.264 first so MediaRecorder uses the Mac's hardware encoder (light CPU).
 const MIME_PREFS = [
   'video/webm;codecs=h264,opus',
-  'video/webm;codecs=h264',
   'video/x-matroska;codecs=avc1,opus',
-  'video/webm;codecs=vp9,opus',
   'video/webm;codecs=vp8,opus',
+  'video/webm;codecs=vp9,opus',
   'video/webm'
 ]
 
@@ -49,8 +51,8 @@ export class StreamCompositor {
 
     // Small offscreen canvas for the monitor preview thumbnail.
     this.thumb = document.createElement('canvas')
-    this.thumb.width = 480
-    this.thumb.height = 270
+    this.thumb.width = 320
+    this.thumb.height = 180
     this.thumbCtx = this.thumb.getContext('2d')
 
     this.screenVideo = document.createElement('video')
@@ -94,7 +96,7 @@ export class StreamCompositor {
     }
 
     if (this.onThumbnail) {
-      this._thumbTimer = setInterval(() => this._emitThumb(), 280)
+      this._thumbTimer = setInterval(() => this._emitThumb(), 500)
     }
 
     return { videoCopy: this._videoCopy, mime }

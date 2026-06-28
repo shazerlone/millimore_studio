@@ -322,7 +322,7 @@ export function GoLive() {
           record: recordEnabled,
           overlayRelayKey: keys.millimore || 'demo'
         })
-        compositor.current.beginRecording(250)
+        compositor.current.beginRecording(120)
         if (startRes?.recordPath) {
           pushToast(`Recording to ${startRes.recordPath}`, 'info', 6000)
         }

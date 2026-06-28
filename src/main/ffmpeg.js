@@ -95,32 +95,53 @@ export class MultistreamEngine extends EventEmitter {
       teeOutput += `|[f=matroska]${rec}`
     }
 
-    // Always re-encode (never stream-copy). The renderer's MediaRecorder WebM
-    // has irregular keyframes and timestamps that RTMP/YouTube reject, causing
-    // the "No data" stalls. Re-encoding with wall-clock timestamps, constant
-    // frame rate and a fixed 2s GOP gives a continuous, healthy RTMP feed.
+    // Always re-encode (never stream-copy): the renderer's MediaRecorder WebM has
+    // irregular keyframes/timestamps that RTMP rejects ("No data"). Re-encoding
+    // with a fixed 2s GOP and constant frame rate gives a continuous feed.
+    // On macOS use the hardware encoder (VideoToolbox) so it's fast and low-CPU
+    // like OBS; fall back to libx264 elsewhere.
+    const fps = preset.fps
+    const videoArgs =
+      process.platform === 'darwin'
+        ? [
+            '-c:v', 'h264_videotoolbox',
+            '-realtime', '1',
+            '-allow_sw', '1',
+            '-profile:v', 'high',
+            '-pix_fmt', 'yuv420p',
+            '-r', String(fps),
+            '-g', String(fps * 2),
+            '-b:v', preset.videoBitrate,
+            '-maxrate', preset.videoBitrate,
+            '-bufsize', preset.bufSize
+          ]
+        : [
+            '-c:v', 'libx264',
+            '-preset', 'veryfast',
+            '-tune', 'zerolatency',
+            '-profile:v', 'high',
+            '-pix_fmt', 'yuv420p',
+            '-r', String(fps),
+            '-vsync', 'cfr',
+            '-g', String(fps * 2),
+            '-keyint_min', String(fps),
+            '-sc_threshold', '0',
+            '-b:v', preset.videoBitrate,
+            '-maxrate', preset.videoBitrate,
+            '-bufsize', preset.bufSize
+          ]
+
     const args = [
       '-thread_queue_size', '512',
+      '-fflags', '+genpts',
       '-use_wallclock_as_timestamps', '1',
       '-i', 'pipe:0',
-      // ---- video ----
-      '-c:v', 'libx264',
-      '-preset', 'veryfast',
-      '-tune', 'zerolatency',
-      '-profile:v', 'high',
-      '-pix_fmt', 'yuv420p',
-      '-r', String(preset.fps),
-      '-vsync', 'cfr',
-      '-g', String(preset.fps * 2),
-      '-keyint_min', String(preset.fps),
-      '-sc_threshold', '0',
-      '-b:v', preset.videoBitrate,
-      '-maxrate', preset.videoBitrate,
-      '-bufsize', preset.bufSize,
+      ...videoArgs,
       // ---- audio (RTMP needs AAC; MediaRecorder gives Opus) ----
       '-c:a', 'aac',
       '-b:a', preset.audioBitrate,
       '-ar', '44100',
+      '-flush_packets', '1',
       // ---- fan-out to every destination ----
       '-f', 'tee',
       '-map', '0:v:0',

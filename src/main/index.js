@@ -42,7 +42,9 @@ let mainWindow = null
 let monitorWin = null
 let tray = null
 let streaming = false
-let monitorAuto = true // auto show/hide the monitor when the main app loses focus
+let monitorAuto = false // popup is summoned from the tray, not on app blur
+let monitorPinned = false // click-to-pin keeps it open; hover only peeks
+let leaveTimer = null
 
 function createTray() {
   if (tray) return
@@ -52,11 +54,13 @@ function createTray() {
   let img = nativeImage.createFromPath(iconPath)
   if (!img.isEmpty()) img = img.resize({ width: 18, height: 18 })
   tray = new Tray(img.isEmpty() ? nativeImage.createEmpty() : img)
-  tray.setToolTip('Millimore Desktop')
+  tray.setToolTip('Millimore — hover to peek, click to pin the monitor')
+
+  // Right-click menu (and Windows fallback).
   tray.setContextMenu(
     Menu.buildFromTemplate([
-      { label: 'Show floating monitor', click: () => showMonitor() },
-      { label: 'Hide floating monitor', click: () => hideMonitor() },
+      { label: 'Pin monitor', click: () => pinMonitor(true) },
+      { label: 'Hide monitor', click: () => pinMonitor(false) },
       { type: 'separator' },
       {
         label: 'Open Millimore',
@@ -71,11 +75,46 @@ function createTray() {
       { label: 'Quit Millimore', click: () => app.quit() }
     ])
   )
-  // Left-click toggles the monitor for quick access.
-  tray.on('click', () => {
-    if (monitorWin && monitorWin.isVisible()) hideMonitor()
-    else showMonitor()
+
+  // Hover to peek (macOS fires these), click to pin / unpin.
+  tray.on('mouse-enter', () => {
+    if (leaveTimer) clearTimeout(leaveTimer)
+    if (!monitorPinned) peekMonitor()
   })
+  tray.on('mouse-leave', () => {
+    if (monitorPinned) return
+    leaveTimer = setTimeout(() => {
+      if (!monitorPinned) hideMonitor()
+    }, 300)
+  })
+  tray.on('click', () => pinMonitor(!monitorPinned))
+}
+
+function positionMonitorUnderTray() {
+  if (!tray || !monitorWin || monitorWin.isDestroyed()) return
+  const tb = tray.getBounds()
+  const wb = monitorWin.getBounds()
+  const { workArea } = require('electron').screen.getPrimaryDisplay()
+  let x = Math.round(tb.x + tb.width / 2 - wb.width / 2)
+  x = Math.max(workArea.x + 8, Math.min(x, workArea.x + workArea.width - wb.width - 8))
+  const y = Math.round((tb.height ? tb.y + tb.height : workArea.y) + 6)
+  monitorWin.setPosition(x, y, false)
+}
+
+function peekMonitor() {
+  const win = createMonitorWindow()
+  const place = () => {
+    positionMonitorUnderTray()
+    win.showInactive()
+  }
+  if (win.webContents.isLoading()) win.webContents.once('did-finish-load', place)
+  else place()
+}
+
+function pinMonitor(pinned) {
+  monitorPinned = pinned
+  if (pinned) peekMonitor()
+  else hideMonitor()
 }
 
 function createMonitorWindow() {
@@ -343,7 +382,7 @@ ipcMain.handle('stream:start', (_e, config) => {
 ipcMain.handle('stream:stop', () => {
   overlay.disconnectRelay()
   streaming = false
-  hideMonitor()
+  pinMonitor(false)
   if (powerBlockerId !== null && powerSaveBlocker.isStarted(powerBlockerId)) {
     powerSaveBlocker.stop(powerBlockerId)
     powerBlockerId = null
@@ -354,8 +393,7 @@ ipcMain.handle('stream:stop', () => {
 // ---- IPC: floating monitor --------------------------------------------
 
 ipcMain.handle('monitor:toggle', (_e, on) => {
-  if (on) showMonitor()
-  else hideMonitor()
+  pinMonitor(!!on)
   return { ok: true }
 })
 ipcMain.handle('monitor:setAuto', (_e, value) => {
