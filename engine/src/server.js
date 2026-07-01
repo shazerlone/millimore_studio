@@ -2,18 +2,21 @@
 
 /**
  * Local control server for the Millimore Streaming Engine.
- * The closed-source Millimore app connects over WebSocket and drives the OBS
- * engine with the JSON protocol documented in engine/README.md.
+ * The closed-source Millimore app connects over WebSocket and drives OBS (over
+ * obs-websocket) with the JSON protocol documented in engine/README.md.
  *
  * Bound to 127.0.0.1 only (never exposed off-machine).
  */
 const { WebSocketServer } = require('ws')
-const { ObsEngine } = require('./obs')
+const { ObsControl } = require('./obsControl')
 
 const PORT = Number(process.env.MILLIMORE_ENGINE_PORT || 28112)
 
-function start({ osnDir } = {}) {
-  const engine = new ObsEngine({ osnDir })
+function start({ obsUrl, obsPassword } = {}) {
+  const engine = new ObsControl({
+    url: obsUrl || process.env.MILLIMORE_OBS_URL,
+    password: obsPassword || process.env.MILLIMORE_OBS_PASSWORD
+  })
   const wss = new WebSocketServer({ host: '127.0.0.1', port: PORT })
   const destinations = []
 
@@ -27,7 +30,7 @@ function start({ osnDir } = {}) {
   wss.on('connection', (ws) => {
     send(ws, { type: 'hello', engine: 'millimore', version: '0.1.0' })
 
-    ws.on('message', (raw) => {
+    ws.on('message', async (raw) => {
       let msg
       try {
         msg = JSON.parse(raw.toString())
@@ -35,53 +38,72 @@ function start({ osnDir } = {}) {
         return send(ws, { type: 'error', message: 'bad json' })
       }
       try {
-        handle(msg, ws)
+        await handle(msg, ws)
       } catch (err) {
         send(ws, { type: 'error', op: msg.type, message: err.message })
       }
     })
   })
 
-  function handle(msg, ws) {
+  async function handle(msg, ws) {
     switch (msg.type) {
-      case 'init':
-        engine.init()
-        return send(ws, { type: 'status', state: 'ready' })
+      case 'init': {
+        const info = await engine.connect()
+        await engine.ensureScene()
+        return send(ws, { type: 'status', state: 'ready', obs: info })
+      }
       case 'setVideo':
-        engine.configureVideo(msg.quality)
+        await engine.configureVideo(msg.quality)
         return send(ws, { type: 'status', state: 'video-configured', quality: msg.quality })
       case 'setScreen':
-        engine.setScreen(msg.sourceId)
+        await engine.setScreen({ display: msg.display, window: msg.window })
         return send(ws, { type: 'status', state: 'screen-set' })
       case 'clearScreen':
-        engine.clearScreen()
+        await engine.clearScreen()
         return send(ws, { type: 'status', state: 'screen-cleared' })
       case 'setCamera':
-        engine.setCamera(msg.deviceId)
+        await engine.setCamera(msg.deviceId)
         return send(ws, { type: 'status', state: 'camera-set' })
+      case 'setOverlay':
+        await engine.setOverlay(msg.url)
+        return send(ws, { type: 'status', state: 'overlay-set' })
+      case 'overlayEvent':
+        await engine.sendOverlayEvent(msg.payload || {})
+        return
       case 'setDestinations':
         destinations.length = 0
         destinations.push(...(msg.targets || []))
         // Single-output for now: use the first destination. Multi-output is a
-        // separate work item (multiple OSN outputs or a Millimore relay).
-        if (destinations[0]) engine.setService(destinations[0].url, destinations[0].key)
+        // separate work item (multiple OBS outputs or a Millimore relay).
+        if (destinations[0]) await engine.setService(destinations[0].url, destinations[0].key)
         return send(ws, { type: 'status', state: 'destinations-set', count: destinations.length })
       case 'start':
-        engine.startStreaming()
+        await engine.startStreaming()
         broadcast({ type: 'status', state: 'live' })
         return
       case 'stop':
-        engine.stopStreaming()
+        await engine.stopStreaming()
         broadcast({ type: 'status', state: 'stopped' })
         return
+      case 'startRecording':
+        await engine.startRecording()
+        return send(ws, { type: 'status', state: 'recording' })
+      case 'stopRecording': {
+        const r = await engine.stopRecording()
+        return send(ws, { type: 'status', state: 'recording-stopped', outputPath: r.outputPath })
+      }
+      case 'stats': {
+        const stats = await engine.getStats()
+        return send(ws, { type: 'stats', ...stats })
+      }
       default:
         return send(ws, { type: 'error', message: 'unknown op: ' + msg.type })
     }
   }
 
-  const shutdown = () => {
+  const shutdown = async () => {
     try {
-      engine.shutdown()
+      await engine.disconnect()
     } finally {
       wss.close()
       process.exit(0)
