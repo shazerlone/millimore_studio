@@ -1,17 +1,16 @@
 import { QUALITY_DIMS } from './quality'
 import { paintOverlay } from './overlayPainter'
 
-const BITRATES = { '720p30': 3_500_000, '1080p30': 6_000_000, '1080p60': 9_000_000 }
+const BITRATES = { '720p30': 4_000_000, '1080p30': 6_500_000, '1080p60': 9_000_000 }
 
-// H.264 codec strings (constrained baseline — low-latency, widely accepted).
-const AVC_CODEC = {
-  '720p30': 'avc1.42E01F', // level 3.1
-  '1080p30': 'avc1.42E028', // level 4.0
-  '1080p60': 'avc1.42E02A' // level 4.2
-}
-
-// MediaRecorder fallback (only if WebCodecs is unavailable). Always audio-inclusive.
-const MIME_PREFS = ['video/webm;codecs=vp8,opus', 'video/webm;codecs=vp9,opus', 'video/webm']
+// VP8/VP9 + Opus: always streamable and always carries audio (unlike H.264-in-WebM,
+// which silently dropped the mic). FFmpeg hardware-encodes it to H.264 once.
+const MIME_PREFS = [
+  'video/webm;codecs=vp8,opus',
+  'video/webm;codecs=vp9,opus',
+  'video/webm;codecs=h264,opus',
+  'video/webm'
+]
 
 function pickMime() {
   if (typeof MediaRecorder === 'undefined') return ''
@@ -26,15 +25,11 @@ function pickMime() {
 }
 
 /**
- * StreamCompositor composites the scene (camera-only, or screen + camera PiP) and
- * the overlay onto a canvas, then encodes it ONCE.
- *
- * Primary path (OBS-style): WebCodecs VideoEncoder hardware-encodes the canvas to
- * H.264 with a fixed keyframe interval and constant bitrate; the microphone is
- * captured as raw PCM. FFmpeg only *copies* the video and encodes audio to AAC —
- * no video re-encode, so it's fast and the bitrate stays healthy.
- *
- * Fallback path: MediaRecorder → WebM → FFmpeg transcode (older runtimes).
+ * StreamCompositor composites the scene (camera-only, or screen + camera PiP) plus
+ * the overlay onto a canvas, captures it (canvas + mic) and encodes it with
+ * MediaRecorder to a compressed WebM stream. FFmpeg then hardware-encodes that to
+ * H.264/RTMP once. Camera-only vs screen+PiP matches the preview, and the screen
+ * source can be changed live.
  */
 export class StreamCompositor {
   constructor({ quality = '1080p30', getOverlay = null, onThumbnail = null } = {}) {
@@ -43,10 +38,9 @@ export class StreamCompositor {
     this.width = dims.width
     this.height = dims.height
     this.fps = dims.fps
-    this.bitrate = BITRATES[quality] || 6_000_000
+    this.bitrate = BITRATES[quality] || 6_500_000
     this.getOverlay = getOverlay
     this.onThumbnail = onThumbnail
-    this.useWebCodecs = typeof window !== 'undefined' && typeof window.VideoEncoder !== 'undefined'
 
     this.canvas = document.createElement('canvas')
     this.canvas.width = this.width
@@ -68,21 +62,15 @@ export class StreamCompositor {
     this._thumbTimer = null
     this._thumbEnabled = false
     this._running = false
-    this._encoding = false
-    this._frameIndex = 0
-
-    // encoders
-    this.videoEncoder = null
     this.recorder = null
-    this.audioCtx = null
-    this.audioNode = null
+    this.outStream = null
   }
 
   setThumbnailEnabled(on) {
     this._thumbEnabled = !!on
   }
 
-  /** Set up camera + canvas loop + the encoder. Returns the chosen mode. */
+  /** Set up camera + canvas loop + the recorder. */
   async prepare(cameraStream) {
     this.cameraStream = cameraStream || null
     if (cameraStream) {
@@ -98,46 +86,11 @@ export class StreamCompositor {
       }, 500)
     }
 
-    const hasAudio = !!cameraStream?.getAudioTracks?.().length
-    if (this.useWebCodecs) {
-      try {
-        this._setupVideoEncoder()
-        return { mode: 'webcodecs', audio: hasAudio }
-      } catch (err) {
-        console.error('WebCodecs unavailable, falling back to MediaRecorder:', err)
-        this.useWebCodecs = false
-      }
-    }
-    this._setupRecorder(cameraStream)
-    return { mode: 'mediarecorder', audio: hasAudio }
-  }
-
-  _setupVideoEncoder() {
-    const codec = AVC_CODEC[this.quality] || AVC_CODEC['1080p30']
-    this.videoEncoder = new VideoEncoder({
-      output: (chunk) => {
-        const buf = new ArrayBuffer(chunk.byteLength)
-        chunk.copyTo(buf)
-        window.millimore?.stream.pushChunk(buf)
-      },
-      error: (e) => console.error('VideoEncoder error:', e)
-    })
-    this.videoEncoder.configure({
-      codec,
-      width: this.width,
-      height: this.height,
-      framerate: this.fps,
-      bitrate: this.bitrate,
-      bitrateMode: 'constant',
-      latencyMode: 'realtime',
-      avc: { format: 'annexb' }
-    })
-  }
-
-  _setupRecorder(cameraStream) {
+    // Composited canvas video + the mic audio track.
     this.outStream = this.canvas.captureStream(this.fps)
     const micTrack = cameraStream?.getAudioTracks?.()[0]
     if (micTrack) this.outStream.addTrack(micTrack)
+
     const mime = pickMime()
     this.recorder = new MediaRecorder(this.outStream, {
       mimeType: mime || undefined,
@@ -147,47 +100,11 @@ export class StreamCompositor {
     this.recorder.ondataavailable = (e) => {
       if (e.data && e.data.size > 0) e.data.arrayBuffer().then((b) => window.millimore?.stream.pushChunk(b))
     }
+    return { mode: 'mediarecorder', audio: !!micTrack, mime }
   }
 
-  /** Begin emitting encoded data (call once FFmpeg is ready). */
   beginRecording(timesliceMs = 200) {
-    if (this.useWebCodecs) {
-      this._encoding = true
-      this._startAudioPCM()
-    } else if (this.recorder && this.recorder.state === 'inactive') {
-      this.recorder.start(timesliceMs)
-    }
-  }
-
-  /** Capture the microphone as 48kHz stereo s16le PCM for FFmpeg (fd 3). */
-  _startAudioPCM() {
-    const track = this.cameraStream?.getAudioTracks?.()[0]
-    if (!track) return
-    try {
-      this.audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 })
-      const src = this.audioCtx.createMediaStreamSource(new MediaStream([track]))
-      const node = this.audioCtx.createScriptProcessor(2048, 1, 1)
-      node.onaudioprocess = (e) => {
-        if (!this._encoding) return
-        const input = e.inputBuffer.getChannelData(0)
-        const pcm = new Int16Array(input.length * 2)
-        for (let i = 0; i < input.length; i++) {
-          let s = Math.max(-1, Math.min(1, input[i]))
-          s = s < 0 ? s * 0x8000 : s * 0x7fff
-          pcm[i * 2] = s
-          pcm[i * 2 + 1] = s
-        }
-        window.millimore?.stream.pushAudio(pcm.buffer)
-      }
-      const sink = this.audioCtx.createGain()
-      sink.gain.value = 0
-      src.connect(node)
-      node.connect(sink)
-      sink.connect(this.audioCtx.destination)
-      this.audioNode = node
-    } catch (err) {
-      console.error('Audio capture error:', err)
-    }
+    if (this.recorder && this.recorder.state === 'inactive') this.recorder.start(timesliceMs)
   }
 
   async setScreenSource(sourceId) {
@@ -223,27 +140,8 @@ export class StreamCompositor {
   _loop() {
     const frameMs = 1000 / this.fps
     this._timer = setInterval(() => {
-      if (!this._running) return
-      this._drawFrame()
-      if (this._encoding && this.videoEncoder) this._encodeFrame()
+      if (this._running) this._drawFrame()
     }, frameMs)
-  }
-
-  _encodeFrame() {
-    // Drop frames if the encoder is backed up (keeps latency/memory in check).
-    if (this.videoEncoder.encodeQueueSize > 2) return
-    let frame
-    try {
-      const ts = Math.round((this._frameIndex * 1e6) / this.fps)
-      frame = new VideoFrame(this.canvas, { timestamp: ts })
-      const keyFrame = this._frameIndex % (this.fps * 2) === 0 // 2s GOP
-      this.videoEncoder.encode(frame, { keyFrame })
-      this._frameIndex++
-    } catch (err) {
-      console.error('encodeFrame error:', err)
-    } finally {
-      if (frame) frame.close()
-    }
   }
 
   _drawFrame() {
@@ -307,27 +205,12 @@ export class StreamCompositor {
     }
   }
 
-  async stop() {
+  stop() {
     this._running = false
-    this._encoding = false
     if (this._timer) clearInterval(this._timer)
     if (this._thumbTimer) clearInterval(this._thumbTimer)
     try {
-      if (this.videoEncoder && this.videoEncoder.state !== 'closed') {
-        await this.videoEncoder.flush().catch(() => {})
-        this.videoEncoder.close()
-      }
-    } catch {
-      /* ignore */
-    }
-    try {
       if (this.recorder && this.recorder.state !== 'inactive') this.recorder.stop()
-    } catch {
-      /* ignore */
-    }
-    try {
-      this.audioNode?.disconnect()
-      await this.audioCtx?.close()
     } catch {
       /* ignore */
     }

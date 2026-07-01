@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process'
+import { spawn, execFileSync } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import ffmpegStatic from 'ffmpeg-static'
 
@@ -6,6 +6,44 @@ import ffmpegStatic from 'ffmpeg-static'
 // `asarUnpack` rule in package.json) — the path it reports still points inside
 // app.asar, so remap it to the unpacked, executable location.
 const FFMPEG_PATH = (ffmpegStatic || '').replace('app.asar', 'app.asar.unpacked')
+
+// Pick the best available hardware H.264 encoder for this machine (cached).
+// macOS → VideoToolbox (Intel Quick Sync + Apple Silicon). Windows/Linux →
+// NVENC / QSV / AMF if present, else software libx264.
+let _cachedEncoder = null
+function detectEncoder() {
+  if (_cachedEncoder) return _cachedEncoder
+  if (process.platform === 'darwin') {
+    _cachedEncoder = 'h264_videotoolbox'
+    return _cachedEncoder
+  }
+  try {
+    const out = execFileSync(FFMPEG_PATH, ['-hide_banner', '-encoders'], { encoding: 'utf8' })
+    if (/\bh264_nvenc\b/.test(out)) _cachedEncoder = 'h264_nvenc'
+    else if (/\bh264_qsv\b/.test(out)) _cachedEncoder = 'h264_qsv'
+    else if (/\bh264_amf\b/.test(out)) _cachedEncoder = 'h264_amf'
+    else _cachedEncoder = 'libx264'
+  } catch {
+    _cachedEncoder = 'libx264'
+  }
+  return _cachedEncoder
+}
+
+/** Encoder-specific quality/latency flags (bitrate flags added by the caller). */
+function encoderArgs(encoder) {
+  switch (encoder) {
+    case 'h264_videotoolbox':
+      return ['-c:v', 'h264_videotoolbox', '-realtime', '1', '-allow_sw', '1', '-profile:v', 'high']
+    case 'h264_nvenc':
+      return ['-c:v', 'h264_nvenc', '-preset', 'p4', '-tune', 'll', '-rc', 'cbr', '-profile:v', 'high']
+    case 'h264_qsv':
+      return ['-c:v', 'h264_qsv', '-profile:v', 'high']
+    case 'h264_amf':
+      return ['-c:v', 'h264_amf', '-usage', 'lowlatency', '-rc', 'cbr', '-profile:v', 'high']
+    default:
+      return ['-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'zerolatency', '-profile:v', 'high']
+  }
+}
 
 /**
  * RTMP ingest endpoints for every supported destination.
@@ -96,59 +134,37 @@ export class MultistreamEngine extends EventEmitter {
     }
 
     const fps = preset.fps
-    const webcodecs = config.mode === 'webcodecs'
-    const hasAudioPipe = webcodecs && config.audio
-    let args
+    const encoder = detectEncoder()
+    this.emit('status', { state: 'encoder', encoder })
 
-    if (webcodecs) {
-      // OBS-style single encode: the renderer already hardware-encoded H.264 with
-      // a fixed 2s GOP and CBR, so FFmpeg just COPIES the video (no re-encode) and
-      // turns the raw mic PCM (fd 3) into AAC. Fast, steady bitrate, real audio.
-      const audioInput = hasAudioPipe
-        ? ['-thread_queue_size', '512', '-f', 's16le', '-ar', '48000', '-ac', '2', '-i', 'pipe:3']
-        : ['-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000']
-      args = [
-        '-thread_queue_size', '512',
-        '-fflags', '+genpts',
-        '-f', 'h264',
-        '-framerate', String(fps),
-        '-i', 'pipe:0',
-        ...audioInput,
-        '-c:v', 'copy',
-        '-c:a', 'aac',
-        '-b:a', preset.audioBitrate,
-        '-ar', '44100',
-        '-flush_packets', '1',
-        '-f', 'tee',
-        '-map', '0:v:0',
-        '-map', '1:a:0',
-        teeOutput
-      ]
-    } else {
-      // Fallback: transcode the renderer's WebM (HW encoder on macOS, x264 else).
-      const videoArgs =
-        process.platform === 'darwin'
-          ? ['-c:v', 'h264_videotoolbox', '-realtime', '1', '-allow_sw', '1', '-profile:v', 'high', '-pix_fmt', 'yuv420p', '-r', String(fps), '-g', String(fps * 2), '-b:v', preset.videoBitrate, '-maxrate', preset.videoBitrate, '-bufsize', preset.bufSize]
-          : ['-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'zerolatency', '-profile:v', 'high', '-pix_fmt', 'yuv420p', '-r', String(fps), '-vsync', 'cfr', '-g', String(fps * 2), '-keyint_min', String(fps), '-sc_threshold', '0', '-b:v', preset.videoBitrate, '-maxrate', preset.videoBitrate, '-bufsize', preset.bufSize]
-      args = [
-        '-thread_queue_size', '512',
-        '-fflags', '+genpts',
-        '-use_wallclock_as_timestamps', '1',
-        '-i', 'pipe:0',
-        ...videoArgs,
-        '-c:a', 'aac',
-        '-b:a', preset.audioBitrate,
-        '-ar', '44100',
-        '-flush_packets', '1',
-        '-f', 'tee',
-        '-map', '0:v:0',
-        '-map', '0:a:0?',
-        teeOutput
-      ]
-    }
+    // Read the renderer's WebM (VP8+Opus), hardware-encode once to H.264 with a
+    // forced 2s keyframe interval and constant frame rate (this is what keeps
+    // YouTube healthy), turn Opus into AAC, and tee to every destination.
+    const args = [
+      '-thread_queue_size', '512',
+      '-fflags', '+genpts',
+      '-use_wallclock_as_timestamps', '1',
+      '-i', 'pipe:0',
+      ...encoderArgs(encoder),
+      '-pix_fmt', 'yuv420p',
+      '-r', String(fps),
+      '-vsync', 'cfr',
+      '-g', String(fps * 2),
+      '-force_key_frames', 'expr:gte(t,n_forced*2)',
+      '-b:v', preset.videoBitrate,
+      '-maxrate', preset.videoBitrate,
+      '-bufsize', preset.bufSize,
+      '-c:a', 'aac',
+      '-b:a', preset.audioBitrate,
+      '-ar', '44100',
+      '-flush_packets', '1',
+      '-f', 'tee',
+      '-map', '0:v:0',
+      '-map', '0:a:0?',
+      teeOutput
+    ]
 
-    const stdio = hasAudioPipe ? ['pipe', 'pipe', 'pipe', 'pipe'] : ['pipe', 'pipe', 'pipe']
-    this.proc = spawn(FFMPEG_PATH, args, { stdio })
+    this.proc = spawn(FFMPEG_PATH, args, { stdio: ['pipe', 'pipe', 'pipe'] })
     // Swallow EPIPE: when FFmpeg exits, in-flight chunk writes would otherwise
     // throw an uncaught exception and crash the main process.
     this.proc.stdin.on('error', () => {})

@@ -27,7 +27,7 @@ export function GoLive() {
   const { bridge, isLive, setIsLive, overlayConfig, updateOverlay, overlayEnabled, setOverlayEnabled, streamStats, pushToast } = useApp()
 
   const [title, setTitle] = useState('London Open — Gold Scalping')
-  const [quality, setQuality] = useState('1080p30')
+  const [quality, setQuality] = useState('720p30')
   const [enabled, setEnabled] = useState({ millimore: true, youtube: true, instagram: false, facebook: false })
   const [keys, setKeys] = useState({ youtube: '', instagram: '', facebook: '' })
   const [speed, setSpeed] = useState(null)
@@ -149,6 +149,15 @@ export function GoLive() {
   useEffect(() => {
     if (!bridge) return
     return bridge.stream.onStatus((s) => {
+      if (s.state === 'encoder') {
+        const hw = s.encoder !== 'libx264'
+        pushToast(
+          hw ? `Hardware encoding active (${s.encoder})` : 'Using software encoding (libx264)',
+          hw ? 'success' : 'info',
+          4000
+        )
+        return
+      }
       setHealth(s)
       if (s.state === 'unstable' && s.recommend) setQuality(s.recommend)
       if (s.state === 'failed') {
