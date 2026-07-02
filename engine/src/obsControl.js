@@ -81,7 +81,7 @@ class ObsControl {
     return { ok: true }
   }
 
-  /** Configure canvas size, output size and FPS from a quality preset. */
+  /** Configure canvas size, output size, FPS, encoder and bitrate from a preset. */
   async configureVideo(quality) {
     const v = VIDEO[quality] || VIDEO['720p30']
     this._video = v
@@ -93,7 +93,42 @@ class ObsControl {
       fpsNumerator: v.fps,
       fpsDenominator: 1
     })
+    // Control the encoder + bitrate ourselves so quality/perf never depend on
+    // whatever the user's OBS happens to be set to (a reset OBS defaults to the
+    // software x264 encoder, which pegs the CPU on Intel Macs → congestion).
+    await this._setOutputParams(v)
     return { ok: true }
+  }
+
+  /**
+   * Force a hardware encoder + CBR bitrate + 2s keyframes into the OBS profile,
+   * so StartStream uses them. Best-effort per platform; falls back silently if a
+   * key doesn't exist on this OBS build.
+   */
+  async _setOutputParams(v) {
+    const hwEncoder =
+      process.platform === 'darwin'
+        ? 'apple_h264' // Apple VideoToolbox (hardware) — low CPU on Intel + ARM
+        : process.platform === 'win32'
+          ? 'nvenc' // best-effort; OBS falls back if no NVIDIA GPU
+          : 'x264'
+    const set = (parameterCategory, parameterName, parameterValue) =>
+      this.obs
+        .call('SetProfileParameter', {
+          parameterCategory,
+          parameterName,
+          parameterValue: String(parameterValue)
+        })
+        .catch(() => {})
+    // Simple output mode is the most predictable to drive over the socket.
+    await set('SimpleOutput', 'Mode', 'Simple')
+    await set('Output', 'Mode', 'Simple')
+    await set('SimpleOutput', 'UseAdvanced', 'false')
+    await set('SimpleOutput', 'StreamEncoder', hwEncoder)
+    await set('SimpleOutput', 'VBitrate', v.bitrate)
+    await set('SimpleOutput', 'ABitrate', 160)
+    // 2s keyframe interval — YouTube penalises long GOPs ("Poor").
+    await set('SimpleOutput', 'StreamEncoderKeyframeInterval', 2)
   }
 
   /** Remove an input (and its scene items) if present — safe if it doesn't exist. */
@@ -106,11 +141,29 @@ class ObsControl {
   }
 
   /**
+   * Create an input, replacing any existing one of the same name. Checks the
+   * authoritative input list first so a re-run never hits "source already exists"
+   * (RemoveInput can return before the removal has fully propagated).
+   */
+  async _recreateInput(inputName, inputKind, inputSettings) {
+    const { inputs } = await this.obs.call('GetInputList')
+    if (inputs.some((i) => i.inputName === inputName)) {
+      await this.obs.call('RemoveInput', { inputName })
+    }
+    await this.obs.call('CreateInput', {
+      sceneName: SCENE,
+      inputName,
+      inputKind,
+      inputSettings,
+      sceneItemEnabled: true
+    })
+  }
+
+  /**
    * Add / replace the screen (display or window) capture source.
    * @param {object} opts { display?: number, window?: string|number }
    */
   async setScreen({ display, window } = {}) {
-    await this._removeInput(SCREEN_INPUT)
     const isWindow = window != null
     let kind
     let settings = {}
@@ -128,13 +181,7 @@ class ObsControl {
     if (display != null) settings.monitor = display
     if (window != null) settings.window = window
 
-    await this.obs.call('CreateInput', {
-      sceneName: SCENE,
-      inputName: SCREEN_INPUT,
-      inputKind: kind,
-      inputSettings: settings,
-      sceneItemEnabled: true
-    })
+    await this._recreateInput(SCREEN_INPUT, kind, settings)
     await this._fitToCanvas(SCREEN_INPUT)
     return { ok: true, kind }
   }
@@ -146,7 +193,6 @@ class ObsControl {
 
   /** Add / replace the webcam source. */
   async setCamera(deviceId) {
-    await this._removeInput(CAMERA_INPUT)
     let kind
     let settings = {}
     if (process.platform === 'darwin') {
@@ -161,13 +207,7 @@ class ObsControl {
     }
     if (!kind) throw new Error('No camera input kind available in this OBS build')
 
-    await this.obs.call('CreateInput', {
-      sceneName: SCENE,
-      inputName: CAMERA_INPUT,
-      inputKind: kind,
-      inputSettings: settings,
-      sceneItemEnabled: true
-    })
+    await this._recreateInput(CAMERA_INPUT, kind, settings)
     return { ok: true, kind }
   }
 
@@ -177,19 +217,12 @@ class ObsControl {
    * @param {string} [deviceId] OBS device_id; empty → system default input
    */
   async setMicrophone(deviceId) {
-    await this._removeInput(MIC_INPUT)
     let kind
     if (process.platform === 'darwin') kind = this._pickKind('coreaudio_input_capture')
     else if (process.platform === 'win32') kind = this._pickKind('wasapi_input_capture')
     else kind = this._pickKind('pulse_input_capture', 'alsa_input_capture')
     if (!kind) throw new Error('No microphone input kind available in this OBS build')
-    await this.obs.call('CreateInput', {
-      sceneName: SCENE,
-      inputName: MIC_INPUT,
-      inputKind: kind,
-      inputSettings: { device_id: deviceId || 'default' },
-      sceneItemEnabled: true
-    })
+    await this._recreateInput(MIC_INPUT, kind, { device_id: deviceId || 'default' })
     return { ok: true, kind }
   }
 
@@ -199,19 +232,12 @@ class ObsControl {
    * @param {string} [deviceId] empty → default output
    */
   async setDesktopAudio(deviceId) {
-    await this._removeInput(DESKTOP_AUDIO_INPUT)
     let kind
     if (process.platform === 'darwin') kind = this._pickKind('sck_audio_capture', 'coreaudio_output_capture')
     else if (process.platform === 'win32') kind = this._pickKind('wasapi_output_capture')
     else kind = this._pickKind('pulse_output_capture')
     if (!kind) return { ok: false, reason: 'no desktop-audio input kind' }
-    await this.obs.call('CreateInput', {
-      sceneName: SCENE,
-      inputName: DESKTOP_AUDIO_INPUT,
-      inputKind: kind,
-      inputSettings: deviceId ? { device_id: deviceId } : {},
-      sceneItemEnabled: true
-    })
+    await this._recreateInput(DESKTOP_AUDIO_INPUT, kind, deviceId ? { device_id: deviceId } : {})
     return { ok: true, kind }
   }
 
@@ -220,20 +246,13 @@ class ObsControl {
    * as an OBS Browser Source that fills the canvas on top of everything.
    */
   async setOverlay(url) {
-    await this._removeInput(OVERLAY_INPUT)
     const kind = this._pickKind('browser_source', 'browser')
     if (!kind) throw new Error('No browser-source input kind available in this OBS build')
-    await this.obs.call('CreateInput', {
-      sceneName: SCENE,
-      inputName: OVERLAY_INPUT,
-      inputKind: kind,
-      inputSettings: {
-        url,
-        width: this._video.base[0],
-        height: this._video.base[1],
-        reroute_audio: false
-      },
-      sceneItemEnabled: true
+    await this._recreateInput(OVERLAY_INPUT, kind, {
+      url,
+      width: this._video.base[0],
+      height: this._video.base[1],
+      reroute_audio: false
     })
     await this._fitToCanvas(OVERLAY_INPUT)
     return { ok: true, kind }

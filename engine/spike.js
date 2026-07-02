@@ -22,7 +22,7 @@ const { ObsControl } = require('./src/obsControl')
 
 const YT_KEY = process.env.YT_KEY
 const QUALITY = process.env.QUALITY || '720p30'
-const SECONDS = Number(process.env.SECONDS || 60)
+const SECONDS = Number(process.env.SECONDS || 180)
 const YT_URL = 'rtmp://a.rtmp.youtube.com/live2'
 const OBS_URL = process.env.OBS_WS_URL || 'ws://127.0.0.1:4455'
 const OBS_PASSWORD = process.env.OBS_WS_PASSWORD || ''
@@ -80,8 +80,9 @@ async function main() {
   const timer = setInterval(async () => {
     try {
       const s = await engine.getStats()
+      const dropPct = s.totalFrames ? ((s.skippedFrames / s.totalFrames) * 100).toFixed(1) : '0.0'
       console.log(
-        `[spike] ${Math.round((Date.now() - t0) / 1000)}s  congestion=${(s.congestion ?? 0).toFixed(2)}  skipped=${s.skippedFrames}/${s.totalFrames}`
+        `[spike] ${Math.round((Date.now() - t0) / 1000)}s  congestion=${(s.congestion ?? 0).toFixed(2)}  dropped=${dropPct}%  (${s.skippedFrames}/${s.totalFrames})`
       )
     } catch {
       /* ignore */
