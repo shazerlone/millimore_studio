@@ -141,22 +141,39 @@ class ObsControl {
   }
 
   /**
-   * Create an input, replacing any existing one of the same name. Checks the
-   * authoritative input list first so a re-run never hits "source already exists"
-   * (RemoveInput can return before the removal has fully propagated).
+   * Idempotently ensure an input exists in our scene with the given settings.
+   * If it already exists we UPDATE it (no RemoveInput → no "source already
+   * exists" race, which OBS hits because RemoveInput returns before the source
+   * is actually gone). If it's missing we create it. Also self-heals an input
+   * that lost its scene item (e.g. the user deleted things in OBS).
    */
   async _recreateInput(inputName, inputKind, inputSettings) {
     const { inputs } = await this.obs.call('GetInputList')
-    if (inputs.some((i) => i.inputName === inputName)) {
-      await this.obs.call('RemoveInput', { inputName })
+    const exists = inputs.some((i) => i.inputName === inputName)
+
+    if (!exists) {
+      await this.obs.call('CreateInput', {
+        sceneName: SCENE,
+        inputName,
+        inputKind,
+        inputSettings,
+        sceneItemEnabled: true
+      })
+      return
     }
-    await this.obs.call('CreateInput', {
-      sceneName: SCENE,
-      inputName,
-      inputKind,
-      inputSettings,
-      sceneItemEnabled: true
-    })
+
+    // Already present — update its settings in place…
+    await this.obs.call('SetInputSettings', { inputName, inputSettings, overlay: true })
+    // …and make sure it still has a scene item in our scene.
+    try {
+      await this.obs.call('GetSceneItemId', { sceneName: SCENE, sourceName: inputName })
+    } catch {
+      await this.obs.call('CreateSceneItem', {
+        sceneName: SCENE,
+        sourceName: inputName,
+        sceneItemEnabled: true
+      })
+    }
   }
 
   /**
