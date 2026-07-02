@@ -31,6 +31,8 @@ const SCENE = 'Millimore'
 const SCREEN_INPUT = 'millimore-screen'
 const CAMERA_INPUT = 'millimore-camera'
 const OVERLAY_INPUT = 'millimore-overlay'
+const MIC_INPUT = 'millimore-mic'
+const DESKTOP_AUDIO_INPUT = 'millimore-desktop-audio'
 
 class ObsControl {
   /**
@@ -164,6 +166,50 @@ class ObsControl {
       inputName: CAMERA_INPUT,
       inputKind: kind,
       inputSettings: settings,
+      sceneItemEnabled: true
+    })
+    return { ok: true, kind }
+  }
+
+  /**
+   * Add / replace the microphone (the streamer's voice). Video-only camera
+   * inputs carry no audio, so without this the broadcast is silent.
+   * @param {string} [deviceId] OBS device_id; empty → system default input
+   */
+  async setMicrophone(deviceId) {
+    await this._removeInput(MIC_INPUT)
+    let kind
+    if (process.platform === 'darwin') kind = this._pickKind('coreaudio_input_capture')
+    else if (process.platform === 'win32') kind = this._pickKind('wasapi_input_capture')
+    else kind = this._pickKind('pulse_input_capture', 'alsa_input_capture')
+    if (!kind) throw new Error('No microphone input kind available in this OBS build')
+    await this.obs.call('CreateInput', {
+      sceneName: SCENE,
+      inputName: MIC_INPUT,
+      inputKind: kind,
+      inputSettings: { device_id: deviceId || 'default' },
+      sceneItemEnabled: true
+    })
+    return { ok: true, kind }
+  }
+
+  /**
+   * Add / replace desktop (system) audio capture — platform sounds, alerts,
+   * a video the trader plays. Optional; mic is the essential one.
+   * @param {string} [deviceId] empty → default output
+   */
+  async setDesktopAudio(deviceId) {
+    await this._removeInput(DESKTOP_AUDIO_INPUT)
+    let kind
+    if (process.platform === 'darwin') kind = this._pickKind('sck_audio_capture', 'coreaudio_output_capture')
+    else if (process.platform === 'win32') kind = this._pickKind('wasapi_output_capture')
+    else kind = this._pickKind('pulse_output_capture')
+    if (!kind) return { ok: false, reason: 'no desktop-audio input kind' }
+    await this.obs.call('CreateInput', {
+      sceneName: SCENE,
+      inputName: DESKTOP_AUDIO_INPUT,
+      inputKind: kind,
+      inputSettings: deviceId ? { device_id: deviceId } : {},
       sceneItemEnabled: true
     })
     return { ok: true, kind }

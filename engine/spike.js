@@ -56,6 +56,20 @@ async function main() {
     console.warn('[spike] camera add failed (continuing screen-only):', e.message)
   }
 
+  try {
+    console.log('[spike] add microphone (default device)')
+    await engine.setMicrophone('')
+  } catch (e) {
+    console.warn('[spike] mic add failed (stream will be silent):', e.message)
+  }
+
+  try {
+    console.log('[spike] add desktop audio (default device)')
+    await engine.setDesktopAudio('')
+  } catch (e) {
+    console.warn('[spike] desktop-audio add skipped:', e.message)
+  }
+
   console.log('[spike] set YouTube destination')
   await engine.setService(YT_URL, YT_KEY)
 

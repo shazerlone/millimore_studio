@@ -64,6 +64,13 @@ function start({ obsUrl, obsPassword } = {}) {
       case 'setCamera':
         await engine.setCamera(msg.deviceId)
         return send(ws, { type: 'status', state: 'camera-set' })
+      case 'setMicrophone':
+        await engine.setMicrophone(msg.deviceId)
+        return send(ws, { type: 'status', state: 'mic-set' })
+      case 'setDesktopAudio': {
+        const r = await engine.setDesktopAudio(msg.deviceId)
+        return send(ws, { type: 'status', state: 'desktop-audio-set', ok: r.ok })
+      }
       case 'setOverlay':
         await engine.setOverlay(msg.url)
         return send(ws, { type: 'status', state: 'overlay-set' })
