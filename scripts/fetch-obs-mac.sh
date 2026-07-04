@@ -42,6 +42,12 @@ echo "fetch-obs-mac: hiding OBS (LSUIElement) …"
 /usr/libexec/PlistBuddy -c "Set :LSUIElement true" "$PLIST" 2>/dev/null \
   || /usr/libexec/PlistBuddy -c "Add :LSUIElement bool true" "$PLIST"
 
-# Editing the plist invalidates OBS's signature; electron-builder re-signs the
-# nested app under the developer identity during packaging (see package.json).
+# Editing the plist invalidates OBS's signature. Ad-hoc re-sign so the app
+# launches on THIS machine for local (unsigned) testing. In CI with real Apple
+# certs, electron-builder re-signs the nested app under the Developer ID, which
+# supersedes this ad-hoc signature.
+echo "fetch-obs-mac: ad-hoc re-signing (local launchability) …"
+codesign --force --deep --sign - "$DEST/OBS.app" 2>/dev/null \
+  || echo "fetch-obs-mac: ad-hoc sign skipped (codesign unavailable) — fine in CI"
+
 echo "fetch-obs-mac: done → $DEST/OBS.app"
