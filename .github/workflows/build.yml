@@ -50,6 +50,10 @@ jobs:
           cache: npm
       - name: Install dependencies
         run: npm ci
+      - name: Install engine (helper) dependencies
+        # The OBS-control helper is bundled via extraResources; it needs its own
+        # node_modules (obs-websocket-js, ws) present at package time.
+        run: cd engine && npm ci
       - name: Fetch FFmpeg binary for ${{ matrix.arch }}
         # ffmpeg-static's installer skips the download if the binary already
         # exists, so `npm ci` leaves the runner's (arm64) binary in place. Delete
@@ -62,12 +66,32 @@ jobs:
         env:
           npm_config_arch: ${{ matrix.arch }}
           npm_config_platform: darwin
+      - name: Bundle OBS engine (hidden) for ${{ matrix.arch }}
+        # Download OBS, hide it (LSUIElement — no dock icon), stage it in
+        # resources/obs so it ships inside Millimore. Users install nothing else.
+        run: bash scripts/fetch-obs-mac.sh ${{ matrix.arch }}
       - name: Build bundles
         run: npm run build
       - name: Package (.dmg + .zip)
-        run: npx electron-builder --mac --${{ matrix.arch }} --publish never
+        # Signs + notarizes when the Apple secrets are configured; otherwise
+        # produces an unsigned build so CI still succeeds. electron-builder
+        # re-signs the nested (plist-edited) OBS.app under the same identity.
+        shell: bash
+        run: |
+          ARGS="--mac --${{ matrix.arch }} --publish never"
+          if [ -n "${APPLE_TEAM_ID}" ]; then
+            ARGS="$ARGS -c.mac.notarize.teamId=${APPLE_TEAM_ID}"
+          fi
+          npx electron-builder $ARGS
         env:
-          CSC_IDENTITY_AUTO_DISCOVERY: false # unsigned — no Apple cert needed
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          # Disable cert auto-discovery only when no cert is supplied, so unsigned
+          # builds still succeed instead of erroring on a missing identity.
+          CSC_IDENTITY_AUTO_DISCOVERY: ${{ secrets.CSC_LINK != '' }}
       - name: Upload installers (artifact)
         uses: actions/upload-artifact@v4
         with:

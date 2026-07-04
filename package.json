@@ -12,7 +12,8 @@
     "start": "electron-vite preview",
     "preview": "electron-vite preview",
     "lint": "eslint . --ext .js,.jsx",
-    "package:mac": "npm run build && electron-builder --mac",
+    "fetch:obs:mac": "bash scripts/fetch-obs-mac.sh",
+    "package:mac": "npm run build && bash scripts/fetch-obs-mac.sh $(node -p process.arch) && electron-builder --mac",
     "package:win": "npm run build && electron-builder --win"
   },
   "dependencies": {
@@ -51,6 +52,22 @@
       {
         "from": "build/icon.png",
         "to": "icon.png"
+      },
+      {
+        "from": "engine",
+        "to": "engine",
+        "filter": [
+          "**/*",
+          "!**/*.log",
+          "!**/.DS_Store"
+        ]
+      },
+      {
+        "from": "resources/obs",
+        "to": "obs",
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "icon": "build/icon.png",
@@ -61,6 +78,10 @@
         "dmg",
         "zip"
       ],
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
       "extendInfo": {
         "NSCameraUsageDescription": "Millimore Desktop uses your camera for your live stream's picture-in-picture webcam.",
         "NSMicrophoneUsageDescription": "Millimore Desktop uses your microphone for your live stream audio.",

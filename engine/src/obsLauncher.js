@@ -15,16 +15,45 @@ const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
 
-/** obs-websocket plugin config path per platform (under the OBS user config dir). */
-function websocketConfigPath() {
+/** OBS user config root per platform. */
+function obsConfigRoot() {
   const home = os.homedir()
   if (process.platform === 'darwin') {
-    return path.join(home, 'Library', 'Application Support', 'obs-studio', 'plugin_config', 'obs-websocket', 'config.json')
+    return path.join(home, 'Library', 'Application Support', 'obs-studio')
   }
   if (process.platform === 'win32') {
-    return path.join(process.env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'obs-studio', 'plugin_config', 'obs-websocket', 'config.json')
+    return path.join(process.env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'obs-studio')
   }
-  return path.join(process.env.XDG_CONFIG_HOME || path.join(home, '.config'), 'obs-studio', 'plugin_config', 'obs-websocket', 'config.json')
+  return path.join(process.env.XDG_CONFIG_HOME || path.join(home, '.config'), 'obs-studio')
+}
+
+/** obs-websocket plugin config path (under the OBS user config dir). */
+function websocketConfigPath() {
+  return path.join(obsConfigRoot(), 'plugin_config', 'obs-websocket', 'config.json')
+}
+
+/**
+ * Seed OBS's global config on a machine that has never run OBS, so the hidden
+ * engine skips the first-run wizard / EULA and starts minimised to tray. Only
+ * writes if there's no config yet — never touches a real user's own OBS setup.
+ */
+function seedObsConfig() {
+  const root = obsConfigRoot()
+  const globalIni = path.join(root, 'global.ini')
+  if (fs.existsSync(globalIni)) return // real OBS install or already seeded
+  fs.mkdirSync(root, { recursive: true })
+  const ini = [
+    '[General]',
+    'FirstRun=true',
+    'LastVersion=503316483',
+    '',
+    '[BasicWindow]',
+    'SysTrayEnabled=true',
+    'SysTrayWhenStarted=true',
+    'SysTrayMinimizeToTray=true',
+    ''
+  ].join('\n')
+  fs.writeFileSync(globalIni, ini)
 }
 
 /** Candidate OBS binaries: explicit override (bundled) first, then known installs. */
@@ -123,6 +152,7 @@ async function ensureObs({ port = 4455 } = {}) {
     )
   }
 
+  seedObsConfig()
   writeWebsocketConfig(port)
 
   // Start OBS minimized/detached so it runs as a background engine, not a window
@@ -143,4 +173,4 @@ async function ensureObs({ port = 4455 } = {}) {
   return { started: true, alreadyRunning: false, binary }
 }
 
-module.exports = { ensureObs, findObsBinary, websocketConfigPath }
+module.exports = { ensureObs, findObsBinary, websocketConfigPath, obsConfigRoot }
