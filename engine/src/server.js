@@ -9,12 +9,14 @@
  */
 const { WebSocketServer } = require('ws')
 const { ObsControl } = require('./obsControl')
+const { ensureObs } = require('./obsLauncher')
 
 const PORT = Number(process.env.MILLIMORE_ENGINE_PORT || 28112)
+const OBS_PORT = Number(process.env.MILLIMORE_OBS_PORT || 4455)
 
 function start({ obsUrl, obsPassword } = {}) {
   const engine = new ObsControl({
-    url: obsUrl || process.env.MILLIMORE_OBS_URL,
+    url: obsUrl || process.env.MILLIMORE_OBS_URL || `ws://127.0.0.1:${OBS_PORT}`,
     password: obsPassword || process.env.MILLIMORE_OBS_PASSWORD
   })
   const wss = new WebSocketServer({ host: '127.0.0.1', port: PORT })
@@ -48,9 +50,13 @@ function start({ obsUrl, obsPassword } = {}) {
   async function handle(msg, ws) {
     switch (msg.type) {
       case 'init': {
+        // Bring OBS up ourselves (launch + configure websocket) so the user
+        // never opens or configures OBS — everything happens inside Millimore.
+        send(ws, { type: 'status', state: 'starting-obs' })
+        const obs = await ensureObs({ port: OBS_PORT })
         const info = await engine.connect()
         await engine.ensureScene()
-        return send(ws, { type: 'status', state: 'ready', obs: info })
+        return send(ws, { type: 'status', state: 'ready', obs: { ...info, ...obs } })
       }
       case 'setVideo':
         await engine.configureVideo(msg.quality)

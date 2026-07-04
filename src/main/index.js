@@ -24,16 +24,20 @@ app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
 
 let powerBlockerId = null
 import Store from 'electron-store'
-import { MultistreamEngine, testConnectionSpeed } from './ffmpeg.js'
+import { MultistreamEngine, testConnectionSpeed, RTMP_ENDPOINTS } from './ffmpeg.js'
+import { EngineClient } from './engineClient.js'
 import { MT5Manager } from './mt5.js'
 import { OverlayManager } from './overlay.js'
 
 const store = new Store({ name: 'millimore-settings' })
 const keyStore = new Store({ name: 'millimore-keys' })
 
-const engine = new MultistreamEngine()
+const engine = new MultistreamEngine() // legacy FFmpeg path (fallback)
+const streamEngine = new EngineClient() // OBS engine (primary)
 const mt5 = new MT5Manager()
 const overlay = new OverlayManager()
+
+let engineStatsTimer = null
 
 let mainWindow = null
 
@@ -282,6 +286,15 @@ function wireEvents() {
   engine.on('status', (s) => send('stream:status', s))
   engine.on('stats', (s) => send('stream:stats', s))
 
+  // OBS engine → renderer (status + live stats). The helper's stray logs are
+  // useful when diagnosing, so surface them to the main console.
+  streamEngine.on('message', (m) => {
+    if (m.type === 'stats') send('engine:stats', m)
+    else send('engine:status', m)
+  })
+  streamEngine.on('status', (s) => send('engine:status', s))
+  streamEngine.on('log', (l) => console.log('[engine]', String(l).trim()))
+
   mt5.on('status', (s) => send('mt5:status', s))
   mt5.on('trade', (trade) => {
     overlay.handleTrade(trade)
@@ -431,6 +444,64 @@ ipcMain.on('stream:chunk', (_e, buffer) => engine.pushChunk(buffer))
 ipcMain.on('stream:audio', (_e, buffer) => engine.pushAudio(buffer))
 ipcMain.handle('stream:testSpeed', () => testConnectionSpeed())
 
+// ---- IPC: OBS engine (primary streaming path) --------------------------
+
+/** Resolve enabled destinations → OBS rtmp_custom targets, real keys first. */
+function resolveTargets(destinations = []) {
+  return destinations
+    .filter((d) => RTMP_ENDPOINTS[d.platform] && (d.key || '').trim())
+    // OBS streams a single output for now (multistream is a later mission), so
+    // put the trader's real destination (YouTube/FB/IG) ahead of the millimore
+    // relay placeholder.
+    .sort((a, b) => (a.platform === 'millimore' ? 1 : 0) - (b.platform === 'millimore' ? 1 : 0))
+    .map((d) => ({ url: RTMP_ENDPOINTS[d.platform].replace(/\/+$/, ''), key: d.key.trim() }))
+}
+
+ipcMain.handle('engine:goLive', async (_e, config = {}) => {
+  const targets = resolveTargets(config.destinations)
+  if (!targets.length) throw new Error('No stream destinations. Add at least one stream key.')
+
+  // Launch the helper (which launches + configures OBS), then build the scene.
+  await streamEngine.launch()
+  await streamEngine.init()
+  await streamEngine.setVideo(config.quality || '720p30')
+  if (config.screenShared) await streamEngine.setScreen({})
+  else await streamEngine.clearScreen()
+  await streamEngine.setCamera(config.cameraDeviceId || '')
+  await streamEngine.setMicrophone(config.micDeviceId || '')
+  await streamEngine.setDesktopAudio('').catch(() => {})
+  await streamEngine.setDestinations(targets)
+  if (config.record) await streamEngine.startRecording().catch(() => {})
+  await streamEngine.start()
+
+  streaming = true
+  if (powerBlockerId === null || !powerSaveBlocker.isStarted(powerBlockerId)) {
+    powerBlockerId = powerSaveBlocker.start('prevent-display-sleep')
+  }
+  // Poll OBS for live health while streaming.
+  clearInterval(engineStatsTimer)
+  engineStatsTimer = setInterval(() => streamEngine.requestStats(), 2000)
+  return { ok: true, targets: targets.length }
+})
+
+ipcMain.handle('engine:stop', async () => {
+  clearInterval(engineStatsTimer)
+  engineStatsTimer = null
+  streaming = false
+  pinMonitor(false)
+  if (powerBlockerId !== null && powerSaveBlocker.isStarted(powerBlockerId)) {
+    powerSaveBlocker.stop(powerBlockerId)
+    powerBlockerId = null
+  }
+  try {
+    await streamEngine.stopRecording().catch(() => {})
+    await streamEngine.stop()
+  } catch {
+    /* already stopped */
+  }
+  return { ok: true }
+})
+
 // ---- IPC: MT5 ----------------------------------------------------------
 
 ipcMain.handle('mt5:connect', (_e, creds) => mt5.connect(creds))
@@ -511,6 +582,7 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   engine.stop()
+  streamEngine.dispose()
   overlay.dispose()
   if (mt5.isConnected) mt5.disconnect()
   if (process.platform !== 'darwin') app.quit()

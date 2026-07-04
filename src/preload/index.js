@@ -34,7 +34,7 @@ const api = {
     onCommand: (cb) => subscribe('monitor:command:relay', cb)
   },
 
-  // ---- Multistream engine (FFmpeg) ----
+  // ---- Multistream engine (legacy FFmpeg fallback) ----
   stream: {
     start: (config) => ipcRenderer.invoke('stream:start', config),
     stop: () => ipcRenderer.invoke('stream:stop'),
@@ -43,6 +43,14 @@ const api = {
     testSpeed: () => ipcRenderer.invoke('stream:testSpeed'),
     onStatus: (cb) => subscribe('stream:status', cb),
     onStats: (cb) => subscribe('stream:stats', cb)
+  },
+
+  // ---- OBS engine (primary): Millimore launches + drives OBS, hidden ----
+  engine: {
+    goLive: (config) => ipcRenderer.invoke('engine:goLive', config),
+    stop: () => ipcRenderer.invoke('engine:stop'),
+    onStatus: (cb) => subscribe('engine:status', cb),
+    onStats: (cb) => subscribe('engine:stats', cb)
   },
 
   // ---- MT5 connection ----

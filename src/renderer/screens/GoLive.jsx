@@ -169,6 +169,35 @@ export function GoLive() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bridge])
 
+  // OBS engine status + live health (congestion / dropped frames).
+  useEffect(() => {
+    if (!bridge) return
+    const offStatus = bridge.engine.onStatus((s) => {
+      if (s.state === 'starting-obs') pushToast('Starting the streaming engine…', 'info', 3000)
+      else if (s.state === 'engine-exit') {
+        pushToast('Streaming engine stopped unexpectedly.', 'error', 8000)
+        actionsRef.current.stopStream?.()
+      } else if (s.type === 'error') {
+        pushToast(s.message || 'Streaming engine error.', 'error', 8000)
+      }
+    })
+    const offStats = bridge.engine.onStats((s) => {
+      const droppedPct = s.totalFrames ? (s.skippedFrames / s.totalFrames) * 100 : 0
+      // Surface sustained trouble the way the FFmpeg path did (stats bar itself
+      // is fed from the store).
+      if ((s.congestion ?? 0) >= 0.8 || droppedPct > 5) {
+        setHealth({ state: 'unstable', message: 'Upload is congested — try a lower quality.' })
+      } else {
+        setHealth(null)
+      }
+    })
+    return () => {
+      offStatus?.()
+      offStats?.()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bridge])
+
   useEffect(() => () => {
     clearInterval(timerRef.current)
     clearTimeout(tradeHideTimer.current)
@@ -317,8 +346,10 @@ export function GoLive() {
     }))
     try {
       if (bridge) {
-        // Build the compositor around the camera. The broadcast matches the
-        // preview: camera-only unless the trader has shared a screen.
+        // The OBS engine captures + encodes + streams natively (screen, camera,
+        // mic all inside OBS). The canvas compositor stays only to feed the
+        // in-app preview and the floating monitor thumbnail — it no longer
+        // broadcasts, so we prepare it but never beginRecording().
         compositor.current = new StreamCompositor({
           quality,
           getOverlay: () => ({
@@ -328,23 +359,20 @@ export function GoLive() {
           }),
           onThumbnail: (url) => bridge.monitor.pushPreview(url)
         })
-        const { mode, audio } = await compositor.current.prepare(cameraStream.current)
+        await compositor.current.prepare(cameraStream.current)
         if (screenSource?.id) await compositor.current.setScreenSource(screenSource.id)
 
-        // Start FFmpeg first, then begin emitting encoded frames.
-        const startRes = await bridge.stream.start({
+        // Broadcast on the OBS engine. Millimore launches + configures OBS
+        // itself — the trader never opens it.
+        await bridge.engine.goLive({
           quality,
           destinations: dests,
           title,
-          mode,
-          audio,
-          record: recordEnabled,
-          overlayRelayKey: keys.millimore || 'demo'
+          screenShared: !!screenSource?.id,
+          cameraDeviceId: '', // OBS default device (label→UID mapping is a later pass)
+          micDeviceId: '',
+          record: recordEnabled
         })
-        compositor.current.beginRecording()
-        if (startRes?.recordPath) {
-          pushToast(`Recording to ${startRes.recordPath}`, 'info', 6000)
-        }
       }
       setIsLive(true)
       startTimer()
@@ -358,7 +386,7 @@ export function GoLive() {
       // Roll back any partial start.
       compositor.current?.stop()
       compositor.current = null
-      await bridge?.stream.stop().catch(() => {})
+      await bridge?.engine.stop().catch(() => {})
 
       const raw = err?.message || ''
       let msg
@@ -380,7 +408,7 @@ export function GoLive() {
   const stopStream = async () => {
     compositor.current?.stop()
     compositor.current = null
-    await bridge?.stream.stop()
+    await bridge?.engine.stop()
     clearInterval(timerRef.current)
     clearTimeout(tradeHideTimer.current)
     setElapsed('00:00:00')

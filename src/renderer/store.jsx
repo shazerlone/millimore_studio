@@ -58,8 +58,21 @@ export function AppProvider({ children }) {
     })
     bridge.settings.get('authed').then((v) => setAuthedState(!!v))
     bridge.settings.get('onboarded').then((v) => setOnboarded(!!v))
-    const off = bridge.stream.onStats(setStreamStats)
-    return off
+    const offStream = bridge.stream.onStats(setStreamStats)
+    // OBS engine health → the same stats surface the UI already renders.
+    const offEngine = bridge.engine.onStats((s) => {
+      const droppedPct = s.totalFrames ? (s.skippedFrames / s.totalFrames) * 100 : 0
+      setStreamStats({
+        live: !!s.streaming,
+        congestion: s.congestion ?? 0,
+        droppedPct,
+        bytes: s.bytes || 0
+      })
+    })
+    return () => {
+      offStream?.()
+      offEngine?.()
+    }
   }, [])
 
   // Persist the session so the user stays logged in until they sign out.

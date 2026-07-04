@@ -30,7 +30,7 @@ async function main() {
   head('obs-websocket-js dependency')
   let ObsControl
   try {
-    ;({ ObsControl } = require('./src/obsControl'))
+    ObsControl = require('./src/obsControl').ObsControl
     require.resolve('obs-websocket-js')
     ok('obs-websocket-js resolved')
   } catch (e) {
