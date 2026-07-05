@@ -32,12 +32,16 @@ function pickMime() {
  * source can be changed live.
  */
 export class StreamCompositor {
-  constructor({ quality = '1080p30', getOverlay = null, onThumbnail = null } = {}) {
+  constructor({ quality = '1080p30', getOverlay = null, onThumbnail = null, previewOnly = false } = {}) {
     const dims = QUALITY_DIMS[quality] || QUALITY_DIMS['1080p30']
     this.quality = quality
     this.width = dims.width
     this.height = dims.height
-    this.fps = dims.fps
+    // The OBS engine broadcasts natively; when this canvas is only feeding the
+    // in-app preview/monitor thumbnail, don't burn CPU painting 30–60fps next
+    // to the encoder — 15fps is plenty for a preview.
+    this.previewOnly = !!previewOnly
+    this.fps = this.previewOnly ? Math.min(dims.fps, 15) : dims.fps
     this.bitrate = BITRATES[quality] || 6_500_000
     this.getOverlay = getOverlay
     this.onThumbnail = onThumbnail
@@ -85,6 +89,10 @@ export class StreamCompositor {
         if (this._thumbEnabled) this._emitThumb()
       }, 500)
     }
+
+    // Preview-only (OBS engine broadcasts): no capture stream, no encoder —
+    // the canvas just paints the preview + thumbnail.
+    if (this.previewOnly) return { mode: 'preview', audio: false, mime: null }
 
     // Composited canvas video + the mic audio track.
     this.outStream = this.canvas.captureStream(this.fps)

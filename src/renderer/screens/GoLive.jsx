@@ -352,6 +352,7 @@ export function GoLive() {
         // broadcasts, so we prepare it but never beginRecording().
         compositor.current = new StreamCompositor({
           quality,
+          previewOnly: true, // OBS broadcasts; this canvas only feeds preview/monitor
           getOverlay: () => ({
             config: overlayConfigRef.current,
             trade: overlayTradeRef.current,

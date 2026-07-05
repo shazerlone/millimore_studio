@@ -1,8 +1,25 @@
-import { spawn } from 'node:child_process'
+import { spawn, execSync } from 'node:child_process'
 import { join } from 'node:path'
 import { existsSync } from 'node:fs'
 import { EventEmitter } from 'node:events'
+import { Socket } from 'node:net'
 import { app } from 'electron'
+
+/** True if something is listening on 127.0.0.1:port. */
+function portOpen(port, timeout = 400) {
+  return new Promise((resolve) => {
+    const s = new Socket()
+    const done = (v) => {
+      s.destroy()
+      resolve(v)
+    }
+    s.setTimeout(timeout)
+    s.once('connect', () => done(true))
+    s.once('timeout', () => done(false))
+    s.once('error', () => done(false))
+    s.connect(port, '127.0.0.1')
+  })
+}
 
 /**
  * App-side client for the Millimore Streaming Engine helper.
@@ -43,8 +60,49 @@ export class EngineClient extends EventEmitter {
     return candidates.find((p) => existsSync(p)) || ''
   }
 
+  /**
+   * Free the control port if a stale helper from a previous session holds it
+   * (force-quit / crash leaves the child alive). Ask it to shut down first;
+   * if it's too old to understand, kill whatever owns the port (macOS/Linux).
+   */
+  async _reclaimPort() {
+    if (!(await portOpen(this.port))) return
+    try {
+      const { WebSocket } = await import('ws')
+      await new Promise((resolve) => {
+        const ws = new WebSocket(`ws://127.0.0.1:${this.port}`)
+        const done = () => {
+          try {
+            ws.close()
+          } catch {
+            /* ignore */
+          }
+          resolve()
+        }
+        ws.on('open', () => ws.send(JSON.stringify({ type: 'shutdown' })))
+        ws.on('close', done)
+        ws.on('error', done)
+        setTimeout(done, 1500)
+      })
+    } catch {
+      /* fall through to force kill */
+    }
+    for (let i = 0; i < 6 && (await portOpen(this.port)); i++) {
+      if (i === 2 && process.platform !== 'win32') {
+        try {
+          execSync(`lsof -ti tcp:${this.port} | xargs kill -9`, { stdio: 'ignore' })
+        } catch {
+          /* nothing to kill */
+        }
+      }
+      await new Promise((r) => setTimeout(r, 400))
+    }
+  }
+
   async launch() {
     if (this.proc) return
+    this._disposing = false
+    await this._reclaimPort()
     const { entry, obsBinary } = this._paths()
     this.proc = spawn(process.execPath, [entry], {
       env: {
@@ -67,7 +125,8 @@ export class EngineClient extends EventEmitter {
         /* ignore */
       }
       this.ws = null
-      this.emit('status', { state: 'engine-exit', code })
+      // Only report unexpected deaths — not our own dispose().
+      if (!this._disposing) this.emit('status', { state: 'engine-exit', code })
     })
     await this._connectWithRetry()
   }
@@ -178,6 +237,7 @@ export class EngineClient extends EventEmitter {
   }
 
   dispose() {
+    this._disposing = true
     try {
       this.ws?.close()
     } catch {
@@ -187,5 +247,7 @@ export class EngineClient extends EventEmitter {
     this.proc = null
     this.ws = null
     this.ready = false
+    // _disposing stays true until the next launch() — the child's async 'exit'
+    // event lands after this method returns.
   }
 }

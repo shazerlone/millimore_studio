@@ -293,7 +293,19 @@ function wireEvents() {
     else send('engine:status', m)
   })
   streamEngine.on('status', (s) => send('engine:status', s))
-  streamEngine.on('log', (l) => console.log('[engine]', String(l).trim()))
+  streamEngine.on('log', (l) => {
+    const line = String(l).trim()
+    console.log('[engine]', line)
+    // Persist for support — in the packaged app there is no console to read.
+    try {
+      const { appendFileSync, mkdirSync } = require('node:fs')
+      const dir = app.getPath('logs')
+      mkdirSync(dir, { recursive: true })
+      appendFileSync(join(dir, 'engine.log'), `${new Date().toISOString()} ${line}\n`)
+    } catch {
+      /* logging must never break streaming */
+    }
+  })
 
   mt5.on('status', (s) => send('mt5:status', s))
   mt5.on('trade', (trade) => {

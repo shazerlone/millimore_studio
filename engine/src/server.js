@@ -29,6 +29,13 @@ function start({ obsUrl, obsPassword } = {}) {
     console.log(`[engine] control server on ws://127.0.0.1:${PORT}`)
   })
 
+  // Without this handler an EADDRINUSE (stale helper holding the port) throws
+  // as an unhandled 'error' event and kills the process with no explanation.
+  wss.on('error', (err) => {
+    console.error('[engine] control server error:', err?.code || '', err?.message || err)
+    process.exit(1)
+  })
+
   wss.on('connection', (ws) => {
     send(ws, { type: 'hello', engine: 'millimore', version: '0.1.0' })
 
@@ -109,6 +116,11 @@ function start({ obsUrl, obsPassword } = {}) {
         const stats = await engine.getStats()
         return send(ws, { type: 'stats', ...stats })
       }
+      case 'shutdown':
+        // Graceful replace: a newer app instance asks us to exit so it can run
+        // a helper matching its own version.
+        send(ws, { type: 'status', state: 'shutting-down' })
+        return shutdown()
       default:
         return send(ws, { type: 'error', message: 'unknown op: ' + msg.type })
     }
