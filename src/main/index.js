@@ -587,6 +587,15 @@ app.whenReady().then(() => {
   wireEvents()
   createWindow()
   createTray()
+  // Pre-warm the streaming engine: boot the helper + hidden OBS in the
+  // background while the trader is still setting up, so Go Live is instant
+  // instead of paying the ~10s OBS cold boot on the first click.
+  setTimeout(() => {
+    streamEngine
+      .launch()
+      .then(() => streamEngine.init())
+      .catch((err) => console.log('[engine] prewarm skipped:', err.message))
+  }, 1500)
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })

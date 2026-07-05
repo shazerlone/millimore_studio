@@ -73,15 +73,30 @@ class ObsControl {
 
   /** Connect and cache the input kinds this OBS build actually supports. */
   async connect() {
+    if (this.connected) {
+      return { obsWebSocketVersion: this._wsVersion, cached: true, inputKinds: this.inputKinds }
+    }
     const { obsWebSocketVersion, negotiatedRpcVersion } = await this.obs.connect(
       this.url,
       this.password || undefined,
       { rpcVersion: 1 }
     )
     this.connected = true
+    this._wsVersion = obsWebSocketVersion
+    this.obs.on('ConnectionClosed', () => {
+      this.connected = false
+    })
+    // Real stream lifecycle from OBS itself, so the app never drifts out of
+    // sync with what the engine is actually doing.
+    this.obs.on('StreamStateChanged', (e) => this._streamStateCb?.(e))
     const { inputKinds } = await this._call('GetInputKindList')
     this.inputKinds = inputKinds || []
     return { obsWebSocketVersion, negotiatedRpcVersion, inputKinds: this.inputKinds }
+  }
+
+  /** Register a callback for OBS StreamStateChanged events. */
+  onStreamState(cb) {
+    this._streamStateCb = cb
   }
 
   /** First input kind whose id contains any of the given substrings. */
@@ -331,6 +346,10 @@ class ObsControl {
     else kind = this._pickKind('pulse_input_capture', 'alsa_input_capture')
     if (!kind) throw new Error('No microphone input kind available in this OBS build')
     await this._recreateInput(MIC_INPUT, kind, { device_id: deviceId || 'default' })
+    // Belt and braces: a muted or zeroed mic is indistinguishable from "audio
+    // is broken" to the streamer, so force it audible.
+    await this._call('SetInputMute', { inputName: MIC_INPUT, inputMuted: false }).catch(() => {})
+    await this._call('SetInputVolume', { inputName: MIC_INPUT, inputVolumeMul: 1 }).catch(() => {})
     return { ok: true, kind }
   }
 
@@ -407,32 +426,51 @@ class ObsControl {
     return { ok: true }
   }
 
-  /** Wait until the stream output is fully inactive (post-stop teardown). */
-  async _waitStreamStopped(timeoutMs = 15000) {
+  /** Poll GetStreamStatus until pred(status) is true, or time out (→ null). */
+  async _waitStream(pred, timeoutMs, interval = 250) {
     const t0 = Date.now()
     while (Date.now() - t0 < timeoutMs) {
       try {
         const s = await this._call('GetStreamStatus')
-        if (!s.outputActive && !s.outputReconnecting) return true
+        if (pred(s)) return s
       } catch {
         /* transient */
       }
-      await new Promise((r) => setTimeout(r, 400))
+      await new Promise((r) => setTimeout(r, interval))
     }
-    return false
+    return null
   }
 
+  _stopped(s) {
+    return !s.outputActive && !s.outputReconnecting
+  }
+
+  /**
+   * Start streaming and VERIFY data is flowing. OBS can enter a dead start
+   * right after boot (output active, encoder up, but 0 kbps sent — YouTube
+   * shows "no data"). Detect it and auto-reset once instead of leaving the
+   * trader staring at a fake "live".
+   */
   async startStreaming() {
-    // If a previous stream is still tearing down (user stopped and immediately
-    // went live again), wait it out instead of erroring.
-    const s = await this._call('GetStreamStatus').catch(() => null)
-    if (s?.outputActive) {
+    // If a previous stream is still tearing down (stop → immediate re-start),
+    // wait it out instead of erroring.
+    const cur = await this._call('GetStreamStatus').catch(() => null)
+    if (cur?.outputActive) {
       await this._call('StopStream').catch(() => {})
-      await this._waitStreamStopped()
+      await this._waitStream((s) => this._stopped(s), 8000)
     }
     this._lastStats = null
-    await this._call('StartStream')
-    return { ok: true }
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await this._call('StartStream')
+      const active = await this._waitStream((s) => s.outputActive, 10000)
+      const sending = active && (await this._waitStream((s) => s.outputBytes > 0, 8000, 500))
+      if (sending) return { ok: true, retried: attempt > 0 }
+      // Dead start — reset the output and try once more.
+      await this._call('StopStream').catch(() => {})
+      await this._waitStream((s) => this._stopped(s), 8000)
+    }
+    throw new Error('Stream connected but no data was sent. Check your stream key, then try again.')
   }
 
   async stopStreaming() {
@@ -441,7 +479,7 @@ class ObsControl {
     } catch {
       /* may already be stopped */
     }
-    await this._waitStreamStopped()
+    await this._waitStream((s) => this._stopped(s), 8000)
     this._lastStats = null
     return { ok: true }
   }

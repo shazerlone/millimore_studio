@@ -170,6 +170,10 @@ export function GoLive() {
   }, [bridge])
 
   // OBS engine status + live health (congestion / dropped frames).
+  const isLiveRef = useRef(false)
+  useEffect(() => {
+    isLiveRef.current = isLive
+  }, [isLive])
   useEffect(() => {
     if (!bridge) return
     const offStatus = bridge.engine.onStatus((s) => {
@@ -177,6 +181,13 @@ export function GoLive() {
       else if (s.state === 'engine-exit') {
         pushToast('Streaming engine stopped unexpectedly.', 'error', 8000)
         actionsRef.current.stopStream?.()
+      } else if (s.state === 'stopped' && isLiveRef.current) {
+        // OBS reported the stream ended (engine-side stop / connection lost) —
+        // keep the UI in lockstep with the real engine state.
+        actionsRef.current.cleanupAfterStop?.()
+        pushToast('Stream ended.', 'info', 5000)
+      } else if (s.state === 'reconnecting' && isLiveRef.current) {
+        setHealth({ state: 'unstable', message: 'Connection dropped — reconnecting…' })
       } else if (s.type === 'error') {
         pushToast(s.message || 'Streaming engine error.', 'error', 8000)
       }
@@ -406,10 +417,10 @@ export function GoLive() {
     }
   }
 
-  const stopStream = async () => {
+  /** Reset the UI to idle (shared by manual stop and engine-reported stops). */
+  const cleanupAfterStop = () => {
     compositor.current?.stop()
     compositor.current = null
-    await bridge?.engine.stop()
     clearInterval(timerRef.current)
     clearTimeout(tradeHideTimer.current)
     setElapsed('00:00:00')
@@ -418,10 +429,17 @@ export function GoLive() {
     setIsLive(false)
   }
 
+  const stopStream = () => {
+    // Flip the UI instantly; the engine tears the output down in the
+    // background (its own 'stopped' event confirms).
+    cleanupAfterStop()
+    bridge?.engine.stop().catch(() => {})
+  }
+
   const activeCount = DESTS.filter((d) => enabled[d.platform]).length
 
   // Keep the monitor command handler pointed at the latest action closures.
-  actionsRef.current = { stopStream, hideTradeCard, placeTrade }
+  actionsRef.current = { stopStream, hideTradeCard, placeTrade, cleanupAfterStop }
 
   return (
     <Page maxWidth={1320}>

@@ -57,11 +57,25 @@ function start({ obsUrl, obsPassword } = {}) {
   async function handle(msg, ws) {
     switch (msg.type) {
       case 'init': {
+        // Already connected (pre-warmed at app start) → instant ready.
+        if (engine.connected) {
+          await engine.ensureScene()
+          return send(ws, { type: 'status', state: 'ready', cached: true })
+        }
         // Bring OBS up ourselves (launch + configure websocket) so the user
         // never opens or configures OBS — everything happens inside Millimore.
         send(ws, { type: 'status', state: 'starting-obs' })
         const obs = await ensureObs({ port: OBS_PORT })
         const info = await engine.connect()
+        // OBS's own stream lifecycle → every connected app window, so the UI
+        // always mirrors the true engine state (even if OBS stops on its own).
+        engine.onStreamState((e) => {
+          const st = e.outputState
+          if (st === 'OBS_WEBSOCKET_OUTPUT_STARTED') broadcast({ type: 'status', state: 'live' })
+          else if (st === 'OBS_WEBSOCKET_OUTPUT_STOPPED') broadcast({ type: 'status', state: 'stopped' })
+          else if (st === 'OBS_WEBSOCKET_OUTPUT_RECONNECTING')
+            broadcast({ type: 'status', state: 'reconnecting' })
+        })
         await engine.ensureScene()
         return send(ws, { type: 'status', state: 'ready', obs: { ...info, ...obs } })
       }

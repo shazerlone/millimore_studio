@@ -9,7 +9,7 @@
  *
  * The end-user only ever interacts with Millimore — OBS is the hidden engine.
  */
-const { spawn } = require('node:child_process')
+const { spawn, execSync } = require('node:child_process')
 const net = require('node:net')
 const fs = require('node:fs')
 const os = require('node:os')
@@ -32,28 +32,65 @@ function websocketConfigPath() {
   return path.join(obsConfigRoot(), 'plugin_config', 'obs-websocket', 'config.json')
 }
 
+/** Merge key=value entries into one section of an ini file (create if needed). */
+function mergeIni(file, section, entries) {
+  let text = ''
+  try {
+    text = fs.readFileSync(file, 'utf8')
+  } catch {
+    /* new file */
+  }
+  const lines = text ? text.split(/\r?\n/) : []
+  const header = `[${section}]`
+  let start = lines.findIndex((l) => l.trim() === header)
+  if (start === -1) {
+    if (lines.length && lines[lines.length - 1].trim() !== '') lines.push('')
+    lines.push(header)
+    for (const [k, v] of Object.entries(entries)) lines.push(`${k}=${v}`)
+  } else {
+    let end = lines.length
+    for (let i = start + 1; i < lines.length; i++) {
+      if (/^\[.+\]$/.test(lines[i].trim())) {
+        end = i
+        break
+      }
+    }
+    for (const [k, v] of Object.entries(entries)) {
+      let found = false
+      for (let i = start + 1; i < end; i++) {
+        if (lines[i].split('=')[0].trim() === k) {
+          lines[i] = `${k}=${v}`
+          found = true
+          break
+        }
+      }
+      if (!found) {
+        let at = end
+        while (at > start + 1 && lines[at - 1].trim() === '') at-- // keep blanks after the section
+        lines.splice(at, 0, `${k}=${v}`)
+        end++
+      }
+    }
+  }
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  fs.writeFileSync(file, lines.join('\n'))
+}
+
 /**
- * Seed OBS's global config on a machine that has never run OBS, so the hidden
- * engine skips the first-run wizard / EULA and starts minimised to tray. Only
- * writes if there's no config yet — never touches a real user's own OBS setup.
+ * Prepare OBS's global config so the engine runs invisibly: skip the first-run
+ * wizard on fresh machines, and disable the tray/menu-bar icon — the window is
+ * hidden at launch (macOS `open -j`), so with the tray off there is NOTHING of
+ * OBS for the user to see.
  */
 function seedObsConfig() {
-  const root = obsConfigRoot()
-  const globalIni = path.join(root, 'global.ini')
-  if (fs.existsSync(globalIni)) return // real OBS install or already seeded
-  fs.mkdirSync(root, { recursive: true })
-  const ini = [
-    '[General]',
-    'FirstRun=true',
-    'LastVersion=503316483',
-    '',
-    '[BasicWindow]',
-    'SysTrayEnabled=true',
-    'SysTrayWhenStarted=true',
-    'SysTrayMinimizeToTray=true',
-    ''
-  ].join('\n')
-  fs.writeFileSync(globalIni, ini)
+  const globalIni = path.join(obsConfigRoot(), 'global.ini')
+  if (!fs.existsSync(globalIni)) {
+    mergeIni(globalIni, 'General', { FirstRun: 'true', LastVersion: '503316483' })
+  }
+  mergeIni(globalIni, 'BasicWindow', {
+    SysTrayEnabled: 'false',
+    SysTrayWhenStarted: 'false'
+  })
 }
 
 /** Candidate OBS binaries: explicit override (bundled) first, then known installs. */
@@ -159,18 +196,27 @@ async function ensureObs({ port = 4455 } = {}) {
   seedObsConfig()
   writeWebsocketConfig(port)
 
-  // Start OBS minimized/detached so it runs as a background engine, not a window
-  // the user has to mind. Full invisibility (no dock icon) comes with the
-  // bundled build's Info.plist; --minimize-to-tray keeps it out of the way here.
-  const args = ['--minimize-to-tray', '--disable-shutdown-check']
-  const child = spawn(binary, args, {
-    detached: true,
-    stdio: 'ignore',
-    // OBS resolves its data relative to the binary; run from its own dir.
-    cwd: path.dirname(binary)
-  })
-  child.unref()
-  spawnedObs = child
+  // Launch OBS truly invisibly. On macOS, `open -j` starts the app in the
+  // OS-level "hidden" state (like Cmd+H): no window on screen — and with the
+  // tray disabled (seedObsConfig) and LSUIElement set on the bundled copy
+  // (no dock icon, no app switcher), nothing of OBS is visible at all.
+  const macAppBundle =
+    process.platform === 'darwin' ? binary.replace(/\/Contents\/MacOS\/[^/]+$/, '') : null
+  if (macAppBundle && macAppBundle !== binary) {
+    spawn('open', ['-n', '-g', '-j', '-a', macAppBundle, '--args', '--disable-shutdown-check'], {
+      stdio: 'ignore'
+    })
+  } else {
+    // Windows/Linux (and bare mac binaries): spawn directly, minimized.
+    const child = spawn(binary, ['--minimize-to-tray', '--disable-shutdown-check'], {
+      detached: true,
+      stdio: 'ignore',
+      // OBS resolves its data relative to the binary; run from its own dir.
+      cwd: path.dirname(binary)
+    })
+    child.unref()
+  }
+  spawnedObs = { binary }
 
   const up = await waitForPort(port, { tries: 60, interval: 500 })
   if (!up) throw new Error('OBS started but its WebSocket never came up on port ' + port)
@@ -180,17 +226,23 @@ async function ensureObs({ port = 4455 } = {}) {
 
 /**
  * Stop the OBS we spawned (no-op if OBS was the user's own instance). The
- * hidden engine has no dock icon or window, so if we don't kill it on exit it
- * would run forever with no way for the user to quit it.
+ * hidden engine has no window, dock icon or tray, so if we don't kill it on
+ * exit it would run forever with no way for the user to quit it.
  */
 function stopObs() {
   if (!spawnedObs) return false
+  const { binary } = spawnedObs
+  spawnedObs = null
   try {
-    process.kill(spawnedObs.pid, 'SIGTERM')
+    if (process.platform === 'win32') {
+      execSync(`taskkill /F /IM ${JSON.stringify(path.basename(binary))}`, { stdio: 'ignore' })
+    } else {
+      // Kill by full binary path — matches only the copy we launched.
+      execSync(`pkill -f ${JSON.stringify(binary)}`, { stdio: 'ignore' })
+    }
   } catch {
     /* already gone */
   }
-  spawnedObs = null
   return true
 }
 
