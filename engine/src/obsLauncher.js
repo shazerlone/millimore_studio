@@ -133,6 +133,10 @@ function writeWebsocketConfig(port) {
   return file
 }
 
+// The OBS process WE spawned (null if OBS was already running — that one is
+// the user's own and we must never kill it).
+let spawnedObs = null
+
 /**
  * Make sure OBS is running with obs-websocket up on `port`.
  *
@@ -166,6 +170,7 @@ async function ensureObs({ port = 4455 } = {}) {
     cwd: path.dirname(binary)
   })
   child.unref()
+  spawnedObs = child
 
   const up = await waitForPort(port, { tries: 60, interval: 500 })
   if (!up) throw new Error('OBS started but its WebSocket never came up on port ' + port)
@@ -173,4 +178,20 @@ async function ensureObs({ port = 4455 } = {}) {
   return { started: true, alreadyRunning: false, binary }
 }
 
-module.exports = { ensureObs, findObsBinary, websocketConfigPath, obsConfigRoot }
+/**
+ * Stop the OBS we spawned (no-op if OBS was the user's own instance). The
+ * hidden engine has no dock icon or window, so if we don't kill it on exit it
+ * would run forever with no way for the user to quit it.
+ */
+function stopObs() {
+  if (!spawnedObs) return false
+  try {
+    process.kill(spawnedObs.pid, 'SIGTERM')
+  } catch {
+    /* already gone */
+  }
+  spawnedObs = null
+  return true
+}
+
+module.exports = { ensureObs, stopObs, findObsBinary, websocketConfigPath, obsConfigRoot }

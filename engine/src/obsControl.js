@@ -47,6 +47,28 @@ class ObsControl {
     this.connected = false
     this.inputKinds = [] // discovered per platform/OBS build
     this._video = VIDEO['720p30']
+    this.screenActive = false
+    this._lastStats = null
+  }
+
+  /**
+   * obs.call with automatic retry. Right after launch, OBS's socket accepts
+   * connections BEFORE the core is ready, so calls fail with "OBS is not ready
+   * to perform the request" — and canvas changes fail with "output is active"
+   * for a beat after a stream stops. Both are transient; retry instead of
+   * surfacing them to the user.
+   */
+  async _call(request, data, { tries = 30, delay = 500 } = {}) {
+    for (let i = 0; ; i++) {
+      try {
+        return await this.obs.call(request, data)
+      } catch (err) {
+        const msg = String(err?.message || '')
+        const transient = /not ready|output is active/i.test(msg)
+        if (!transient || i >= tries - 1) throw err
+        await new Promise((r) => setTimeout(r, delay))
+      }
+    }
   }
 
   /** Connect and cache the input kinds this OBS build actually supports. */
@@ -57,7 +79,7 @@ class ObsControl {
       { rpcVersion: 1 }
     )
     this.connected = true
-    const { inputKinds } = await this.obs.call('GetInputKindList')
+    const { inputKinds } = await this._call('GetInputKindList')
     this.inputKinds = inputKinds || []
     return { obsWebSocketVersion, negotiatedRpcVersion, inputKinds: this.inputKinds }
   }
@@ -73,11 +95,11 @@ class ObsControl {
 
   /** Ensure our scene exists and is the current program scene. */
   async ensureScene() {
-    const { scenes } = await this.obs.call('GetSceneList')
+    const { scenes } = await this._call('GetSceneList')
     if (!scenes.some((s) => s.sceneName === SCENE)) {
-      await this.obs.call('CreateScene', { sceneName: SCENE })
+      await this._call('CreateScene', { sceneName: SCENE })
     }
-    await this.obs.call('SetCurrentProgramScene', { sceneName: SCENE })
+    await this._call('SetCurrentProgramScene', { sceneName: SCENE })
     return { ok: true }
   }
 
@@ -85,7 +107,7 @@ class ObsControl {
   async configureVideo(quality) {
     const v = VIDEO[quality] || VIDEO['720p30']
     this._video = v
-    await this.obs.call('SetVideoSettings', {
+    await this._call('SetVideoSettings', {
       baseWidth: v.base[0],
       baseHeight: v.base[1],
       outputWidth: v.out[0],
@@ -97,7 +119,71 @@ class ObsControl {
     // whatever the user's OBS happens to be set to (a reset OBS defaults to the
     // software x264 encoder, which pegs the CPU on Intel Macs → congestion).
     await this._setOutputParams(v)
+    // The canvas size changed — re-lay-out any sources that already exist, or a
+    // 720p camera ends up parked in the corner of a 1080p canvas.
+    await this._relayout()
     return { ok: true }
+  }
+
+  /** Does this input currently have a scene item in our scene? */
+  async _hasItem(inputName) {
+    try {
+      await this._call('GetSceneItemId', { sceneName: SCENE, sourceName: inputName })
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * Re-apply the layout to whatever sources exist for the current canvas:
+   * screen fills the canvas, overlay fills the canvas, camera is fullscreen
+   * when solo and a bottom-right PiP when a screen is shared.
+   */
+  async _relayout() {
+    if (await this._hasItem(SCREEN_INPUT)) await this._fitToCanvas(SCREEN_INPUT)
+    if (await this._hasItem(OVERLAY_INPUT)) {
+      await this._call('SetInputSettings', {
+        inputName: OVERLAY_INPUT,
+        inputSettings: { width: this._video.base[0], height: this._video.base[1] },
+        overlay: true
+      }).catch(() => {})
+      await this._fitToCanvas(OVERLAY_INPUT)
+    }
+    await this._layoutCamera()
+  }
+
+  /** Position the camera: fullscreen when solo, bottom-right PiP over a screen. */
+  async _layoutCamera() {
+    if (!(await this._hasItem(CAMERA_INPUT))) return
+    const [bw, bh] = this._video.base
+    if (!this.screenActive) {
+      await this._fitToCanvas(CAMERA_INPUT)
+      return
+    }
+    const w = Math.round(bw * 0.28)
+    const h = Math.round((w * 9) / 16)
+    const margin = Math.round(bw * 0.02)
+    await this._setTransform(CAMERA_INPUT, {
+      boundsType: 'OBS_BOUNDS_SCALE_INNER',
+      boundsWidth: w,
+      boundsHeight: h,
+      positionX: bw - w - margin,
+      positionY: bh - h - margin
+    })
+  }
+
+  /** Apply a transform to an input's scene item (best-effort). */
+  async _setTransform(inputName, sceneItemTransform) {
+    try {
+      const { sceneItemId } = await this._call('GetSceneItemId', {
+        sceneName: SCENE,
+        sourceName: inputName
+      })
+      await this._call('SetSceneItemTransform', { sceneName: SCENE, sceneItemId, sceneItemTransform })
+    } catch {
+      /* best-effort */
+    }
   }
 
   /**
@@ -134,7 +220,7 @@ class ObsControl {
   /** Remove an input (and its scene items) if present — safe if it doesn't exist. */
   async _removeInput(inputName) {
     try {
-      await this.obs.call('RemoveInput', { inputName })
+      await this._call('RemoveInput', { inputName })
     } catch {
       /* not present — fine */
     }
@@ -148,11 +234,11 @@ class ObsControl {
    * that lost its scene item (e.g. the user deleted things in OBS).
    */
   async _recreateInput(inputName, inputKind, inputSettings) {
-    const { inputs } = await this.obs.call('GetInputList')
+    const { inputs } = await this._call('GetInputList')
     const exists = inputs.some((i) => i.inputName === inputName)
 
     if (!exists) {
-      await this.obs.call('CreateInput', {
+      await this._call('CreateInput', {
         sceneName: SCENE,
         inputName,
         inputKind,
@@ -163,12 +249,12 @@ class ObsControl {
     }
 
     // Already present — update its settings in place…
-    await this.obs.call('SetInputSettings', { inputName, inputSettings, overlay: true })
+    await this._call('SetInputSettings', { inputName, inputSettings, overlay: true })
     // …and make sure it still has a scene item in our scene.
     try {
-      await this.obs.call('GetSceneItemId', { sceneName: SCENE, sourceName: inputName })
+      await this._call('GetSceneItemId', { sceneName: SCENE, sourceName: inputName })
     } catch {
-      await this.obs.call('CreateSceneItem', {
+      await this._call('CreateSceneItem', {
         sceneName: SCENE,
         sourceName: inputName,
         sceneItemEnabled: true
@@ -199,12 +285,16 @@ class ObsControl {
     if (window != null) settings.window = window
 
     await this._recreateInput(SCREEN_INPUT, kind, settings)
+    this.screenActive = true
     await this._fitToCanvas(SCREEN_INPUT)
+    await this._layoutCamera() // camera becomes a PiP over the screen
     return { ok: true, kind }
   }
 
   async clearScreen() {
     await this._removeInput(SCREEN_INPUT)
+    this.screenActive = false
+    await this._layoutCamera() // camera returns to fullscreen
     return { ok: true }
   }
 
@@ -225,6 +315,7 @@ class ObsControl {
     if (!kind) throw new Error('No camera input kind available in this OBS build')
 
     await this._recreateInput(CAMERA_INPUT, kind, settings)
+    await this._layoutCamera() // fullscreen solo, PiP when a screen is shared
     return { ok: true, kind }
   }
 
@@ -278,7 +369,7 @@ class ObsControl {
   /** Push new overlay state to the browser source (via a custom event it listens for). */
   async sendOverlayEvent(payload) {
     // The overlay page subscribes to obs-websocket CustomEvent broadcasts.
-    await this.obs.call('BroadcastCustomEvent', {
+    await this._call('BroadcastCustomEvent', {
       eventData: { realm: 'millimore-overlay', ...payload }
     })
     return { ok: true }
@@ -287,11 +378,11 @@ class ObsControl {
   /** Stretch a scene item to fill the whole canvas. */
   async _fitToCanvas(inputName) {
     try {
-      const { sceneItemId } = await this.obs.call('GetSceneItemId', {
+      const { sceneItemId } = await this._call('GetSceneItemId', {
         sceneName: SCENE,
         sourceName: inputName
       })
-      await this.obs.call('SetSceneItemTransform', {
+      await this._call('SetSceneItemTransform', {
         sceneName: SCENE,
         sceneItemId,
         sceneItemTransform: {
@@ -309,51 +400,91 @@ class ObsControl {
 
   /** Configure the RTMP destination (single output — see server.js for multi). */
   async setService(server, key) {
-    await this.obs.call('SetStreamServiceSettings', {
+    await this._call('SetStreamServiceSettings', {
       streamServiceType: 'rtmp_custom',
       streamServiceSettings: { server, key, use_auth: false, bwtest: false }
     })
     return { ok: true }
   }
 
+  /** Wait until the stream output is fully inactive (post-stop teardown). */
+  async _waitStreamStopped(timeoutMs = 15000) {
+    const t0 = Date.now()
+    while (Date.now() - t0 < timeoutMs) {
+      try {
+        const s = await this._call('GetStreamStatus')
+        if (!s.outputActive && !s.outputReconnecting) return true
+      } catch {
+        /* transient */
+      }
+      await new Promise((r) => setTimeout(r, 400))
+    }
+    return false
+  }
+
   async startStreaming() {
-    await this.obs.call('StartStream')
+    // If a previous stream is still tearing down (user stopped and immediately
+    // went live again), wait it out instead of erroring.
+    const s = await this._call('GetStreamStatus').catch(() => null)
+    if (s?.outputActive) {
+      await this._call('StopStream').catch(() => {})
+      await this._waitStreamStopped()
+    }
+    this._lastStats = null
+    await this._call('StartStream')
     return { ok: true }
   }
 
   async stopStreaming() {
     try {
-      await this.obs.call('StopStream')
+      await this._call('StopStream')
     } catch {
       /* may already be stopped */
     }
+    await this._waitStreamStopped()
+    this._lastStats = null
     return { ok: true }
   }
 
   async startRecording() {
-    await this.obs.call('StartRecord')
+    await this._call('StartRecord')
     return { ok: true }
   }
 
   async stopRecording() {
     try {
-      const { outputPath } = await this.obs.call('StopRecord')
+      const { outputPath } = await this._call('StopRecord')
       return { ok: true, outputPath }
     } catch {
       return { ok: true }
     }
   }
 
-  /** Live streaming stats (for the app's health indicator). */
+  /** Live streaming stats (for the app's health indicator + stats bar). */
   async getStats() {
-    const s = await this.obs.call('GetStreamStatus')
+    const s = await this._call('GetStreamStatus')
+    // Derive live bitrate + fps from the deltas between polls, so the app can
+    // show real numbers instead of placeholders.
+    const now = Date.now()
+    let bitrateKbps = 0
+    let fps = 0
+    if (this._lastStats && s.outputActive) {
+      const dt = (now - this._lastStats.t) / 1000
+      if (dt > 0.2) {
+        bitrateKbps = Math.max(0, Math.round(((s.outputBytes - this._lastStats.bytes) * 8) / 1000 / dt))
+        fps = Math.max(0, Math.round((s.outputTotalFrames - this._lastStats.frames) / dt))
+      }
+    }
+    this._lastStats = { t: now, bytes: s.outputBytes || 0, frames: s.outputTotalFrames || 0 }
     return {
       streaming: s.outputActive,
       congestion: s.outputCongestion, // 0..1 — our "health" signal
       skippedFrames: s.outputSkippedFrames,
       totalFrames: s.outputTotalFrames,
       bytes: s.outputBytes,
-      durationMs: s.outputDuration
+      durationMs: s.outputDuration,
+      bitrateKbps,
+      fps
     }
   }
 

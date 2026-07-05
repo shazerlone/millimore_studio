@@ -9,7 +9,7 @@
  */
 const { WebSocketServer } = require('ws')
 const { ObsControl } = require('./obsControl')
-const { ensureObs } = require('./obsLauncher')
+const { ensureObs, stopObs } = require('./obsLauncher')
 
 const PORT = Number(process.env.MILLIMORE_ENGINE_PORT || 28112)
 const OBS_PORT = Number(process.env.MILLIMORE_OBS_PORT || 4455)
@@ -118,6 +118,9 @@ function start({ obsUrl, obsPassword } = {}) {
     try {
       await engine.disconnect()
     } finally {
+      // Kill the hidden OBS we spawned (never a user's own instance) — with no
+      // dock icon or window, a leaked engine would be unquittable.
+      stopObs()
       wss.close()
       process.exit(0)
     }

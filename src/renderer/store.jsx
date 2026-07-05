@@ -59,14 +59,18 @@ export function AppProvider({ children }) {
     bridge.settings.get('authed').then((v) => setAuthedState(!!v))
     bridge.settings.get('onboarded').then((v) => setOnboarded(!!v))
     const offStream = bridge.stream.onStats(setStreamStats)
-    // OBS engine health → the same stats surface the UI already renders.
+    // OBS engine health → the same stats surface the UI already renders
+    // (LiveStatsBar reads bitrateKbps / fps / dropped).
     const offEngine = bridge.engine.onStats((s) => {
       const droppedPct = s.totalFrames ? (s.skippedFrames / s.totalFrames) * 100 : 0
       setStreamStats({
         live: !!s.streaming,
         congestion: s.congestion ?? 0,
         droppedPct,
-        bytes: s.bytes || 0
+        bytes: s.bytes || 0,
+        bitrateKbps: s.bitrateKbps || 0,
+        fps: s.fps || 0,
+        dropped: s.skippedFrames || 0
       })
     })
     return () => {
