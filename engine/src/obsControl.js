@@ -313,25 +313,61 @@ class ObsControl {
     return { ok: true }
   }
 
-  /** Add / replace the webcam source. */
-  async setCamera(deviceId) {
+  /**
+   * Find an OBS device value by the human-readable name the app's dropdowns
+   * show (browser deviceIds are opaque hashes OBS has never heard of — the
+   * label is the only identifier both sides share).
+   */
+  async _matchDevice(inputName, propertyName, label) {
+    if (!label) return null
+    try {
+      const { propertyItems } = await this._call('GetInputPropertiesListPropertyItems', {
+        inputName,
+        propertyName
+      })
+      const norm = (s) =>
+        String(s || '')
+          .toLowerCase()
+          .trim()
+      const want = norm(label)
+      const hit =
+        propertyItems.find((i) => norm(i.itemName) === want) ||
+        // Browser labels often carry suffixes like "(Built-in)" — fuzzy match.
+        propertyItems.find((i) => norm(i.itemName) && (want.includes(norm(i.itemName)) || norm(i.itemName).includes(want)))
+      return hit ? hit.itemValue : null
+    } catch {
+      return null
+    }
+  }
+
+  /** Add / replace the webcam source. @param {string} [deviceLabel] device name from the app dropdown */
+  async setCamera(deviceLabel) {
     let kind
-    let settings = {}
+    let prop
     if (process.platform === 'darwin') {
       kind = this._pickKind('av_capture_input_v2', 'av_capture_input')
-      if (deviceId) settings.device = deviceId
+      prop = 'device'
     } else if (process.platform === 'win32') {
       kind = this._pickKind('dshow_input')
-      if (deviceId) settings.video_device_id = deviceId
+      prop = 'video_device_id'
     } else {
       kind = this._pickKind('v4l2_input', 'dshow_input')
-      if (deviceId) settings.device_id = deviceId
+      prop = 'device_id'
     }
     if (!kind) throw new Error('No camera input kind available in this OBS build')
 
-    await this._recreateInput(CAMERA_INPUT, kind, settings)
+    // Create on the default device, then switch to the picked one by label.
+    await this._recreateInput(CAMERA_INPUT, kind, {})
+    const value = await this._matchDevice(CAMERA_INPUT, prop, deviceLabel)
+    if (value != null) {
+      await this._call('SetInputSettings', {
+        inputName: CAMERA_INPUT,
+        inputSettings: { [prop]: value },
+        overlay: true
+      }).catch(() => {})
+    }
     await this._layoutCamera() // fullscreen solo, PiP when a screen is shared
-    return { ok: true, kind }
+    return { ok: true, kind, matched: value != null }
   }
 
   /**
@@ -339,18 +375,26 @@ class ObsControl {
    * inputs carry no audio, so without this the broadcast is silent.
    * @param {string} [deviceId] OBS device_id; empty → system default input
    */
-  async setMicrophone(deviceId) {
+  async setMicrophone(deviceLabel) {
     let kind
     if (process.platform === 'darwin') kind = this._pickKind('coreaudio_input_capture')
     else if (process.platform === 'win32') kind = this._pickKind('wasapi_input_capture')
     else kind = this._pickKind('pulse_input_capture', 'alsa_input_capture')
     if (!kind) throw new Error('No microphone input kind available in this OBS build')
-    await this._recreateInput(MIC_INPUT, kind, { device_id: deviceId || 'default' })
+    await this._recreateInput(MIC_INPUT, kind, { device_id: 'default' })
+    const value = await this._matchDevice(MIC_INPUT, 'device_id', deviceLabel)
+    if (value != null) {
+      await this._call('SetInputSettings', {
+        inputName: MIC_INPUT,
+        inputSettings: { device_id: value },
+        overlay: true
+      }).catch(() => {})
+    }
     // Belt and braces: a muted or zeroed mic is indistinguishable from "audio
     // is broken" to the streamer, so force it audible.
     await this._call('SetInputMute', { inputName: MIC_INPUT, inputMuted: false }).catch(() => {})
     await this._call('SetInputVolume', { inputName: MIC_INPUT, inputVolumeMul: 1 }).catch(() => {})
-    return { ok: true, kind }
+    return { ok: true, kind, matched: value != null }
   }
 
   /**

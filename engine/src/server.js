@@ -21,6 +21,9 @@ function start({ obsUrl, obsPassword } = {}) {
   })
   const wss = new WebSocketServer({ host: '127.0.0.1', port: PORT })
   const destinations = []
+  // Latest overlay state (trade / scene / config) — replayed to the OBS
+  // browser-source page when it (re)connects so it never starts blank.
+  let lastOverlay = null
 
   const send = (ws, msg) => ws.readyState === ws.OPEN && ws.send(JSON.stringify(msg))
   const broadcast = (msg) => wss.clients.forEach((c) => send(c, msg))
@@ -38,6 +41,7 @@ function start({ obsUrl, obsPassword } = {}) {
 
   wss.on('connection', (ws) => {
     send(ws, { type: 'hello', engine: 'millimore', version: '0.1.0' })
+    if (lastOverlay) send(ws, { type: 'overlay', payload: lastOverlay })
 
     ws.on('message', async (raw) => {
       let msg
@@ -102,7 +106,10 @@ function start({ obsUrl, obsPassword } = {}) {
         await engine.setOverlay(msg.url)
         return send(ws, { type: 'status', state: 'overlay-set' })
       case 'overlayEvent':
-        await engine.sendOverlayEvent(msg.payload || {})
+        // Fan the new overlay state out to every client — including the OBS
+        // browser-source page, which paints it onto the broadcast.
+        lastOverlay = msg.payload || {}
+        broadcast({ type: 'overlay', payload: lastOverlay })
         return
       case 'setDestinations':
         destinations.length = 0

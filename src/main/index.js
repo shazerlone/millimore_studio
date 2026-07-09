@@ -469,6 +469,16 @@ function resolveTargets(destinations = []) {
     .map((d) => ({ url: RTMP_ENDPOINTS[d.platform].replace(/\/+$/, ''), key: d.key.trim() }))
 }
 
+/** file:// URL of the broadcast overlay page (ships with the engine). */
+function overlayPageUrl() {
+  const { pathToFileURL } = require('node:url')
+  const page = app.isPackaged
+    ? join(process.resourcesPath, 'engine', 'overlay', 'index.html')
+    : join(__dirname, '..', '..', 'engine', 'overlay', 'index.html')
+  const port = process.env.MILLIMORE_ENGINE_PORT || 28112
+  return `${pathToFileURL(page).href}#port=${port}`
+}
+
 ipcMain.handle('engine:goLive', async (_e, config = {}) => {
   const targets = resolveTargets(config.destinations)
   if (!targets.length) throw new Error('No stream destinations. Add at least one stream key.')
@@ -479,9 +489,13 @@ ipcMain.handle('engine:goLive', async (_e, config = {}) => {
   await streamEngine.setVideo(config.quality || '720p30')
   if (config.screenShared) await streamEngine.setScreen({})
   else await streamEngine.clearScreen()
-  await streamEngine.setCamera(config.cameraDeviceId || '')
-  await streamEngine.setMicrophone(config.micDeviceId || '')
+  await streamEngine.setCamera(config.cameraLabel || '')
+  await streamEngine.setMicrophone(config.micLabel || '')
   await streamEngine.setDesktopAudio('').catch(() => {})
+  // Trade cards / ticker / watermark / scenes — composited by OBS on top.
+  await streamEngine.setOverlay(overlayPageUrl()).catch((err) => {
+    console.log('[engine] overlay skipped:', err.message)
+  })
   await streamEngine.setDestinations(targets)
   if (config.record) await streamEngine.startRecording().catch(() => {})
   await streamEngine.start()
@@ -495,6 +509,13 @@ ipcMain.handle('engine:goLive', async (_e, config = {}) => {
   engineStatsTimer = setInterval(() => streamEngine.requestStats(), 2000)
   return { ok: true, targets: targets.length }
 })
+
+// Overlay state (trade / scene / ticker config) → the broadcast overlay page.
+ipcMain.on('engine:overlayEvent', (_e, payload) => streamEngine.overlayEvent(payload || {}))
+
+// Live device switching while streaming (by device label).
+ipcMain.handle('engine:setCamera', (_e, label) => streamEngine.setCamera(label || ''))
+ipcMain.handle('engine:setMicrophone', (_e, label) => streamEngine.setMicrophone(label || ''))
 
 ipcMain.handle('engine:stop', async () => {
   clearInterval(engineStatsTimer)

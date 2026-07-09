@@ -49,6 +49,9 @@ const api = {
   engine: {
     goLive: (config) => ipcRenderer.invoke('engine:goLive', config),
     stop: () => ipcRenderer.invoke('engine:stop'),
+    overlayEvent: (payload) => ipcRenderer.send('engine:overlayEvent', payload),
+    setCamera: (label) => ipcRenderer.invoke('engine:setCamera', label),
+    setMicrophone: (label) => ipcRenderer.invoke('engine:setMicrophone', label),
     onStatus: (cb) => subscribe('engine:status', cb),
     onStats: (cb) => subscribe('engine:stats', cb)
   },

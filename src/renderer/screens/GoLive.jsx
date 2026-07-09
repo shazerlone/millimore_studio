@@ -129,16 +129,22 @@ export function GoLive() {
     return stream
   }
 
-  // Apply a device change live (also restarts mic capture if streaming).
+  // Apply a device change live: re-acquire locally for the preview, and tell
+  // the OBS engine to switch its capture device (matched by label).
   const changeDevice = async (kind, id) => {
     if (kind === 'cam') setCamId(id)
     else setMicId(id)
-    // Defer so state is set before re-acquire reads it. The mic track is muxed
-    // by the compositor's recorder, so re-acquiring updates it live.
+    // Defer so state is set before re-acquire reads it.
     setTimeout(async () => {
       try {
         const stream = await acquireCamera()
-        if (isLive) compositor.current?.setCameraStream(stream)
+        if (isLive) {
+          compositor.current?.setCameraStream(stream)
+          const list = kind === 'cam' ? devices.cams : devices.mics
+          const label = list.find((d) => d.deviceId === id)?.label || ''
+          if (kind === 'cam') await bridge?.engine.setCamera(label)
+          else await bridge?.engine.setMicrophone(label)
+        }
       } catch (err) {
         console.error('Device switch failed:', err)
       }
@@ -208,6 +214,18 @@ export function GoLive() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bridge])
+
+  // Mirror overlay state (trade card / ticker / watermark / scene) onto the
+  // BROADCAST: the engine fans it out to the OBS browser-source page, which
+  // paints it over the stream with the same painter as the preview.
+  useEffect(() => {
+    if (!bridge || !isLive) return
+    bridge.engine.overlayEvent({
+      config: overlayConfig,
+      trade: overlayEnabled ? overlayTrade : null,
+      scene
+    })
+  }, [bridge, isLive, overlayTrade, overlayEnabled, overlayConfig, scene])
 
   useEffect(() => () => {
     clearInterval(timerRef.current)
@@ -375,14 +393,15 @@ export function GoLive() {
         if (screenSource?.id) await compositor.current.setScreenSource(screenSource.id)
 
         // Broadcast on the OBS engine. Millimore launches + configures OBS
-        // itself — the trader never opens it.
+        // itself — the trader never opens it. Devices are matched by label
+        // (the only identifier the browser and OBS share).
         await bridge.engine.goLive({
           quality,
           destinations: dests,
           title,
           screenShared: !!screenSource?.id,
-          cameraDeviceId: '', // OBS default device (label→UID mapping is a later pass)
-          micDeviceId: '',
+          cameraLabel: devices.cams.find((d) => d.deviceId === camId)?.label || '',
+          micLabel: devices.mics.find((d) => d.deviceId === micId)?.label || '',
           record: recordEnabled
         })
       }
