@@ -19,6 +19,14 @@ esac
 
 OBS_VERSION="${OBS_VERSION:-30.2.3}"
 DEST="resources/obs"
+STAMP="$DEST/.obs-version"
+
+# Already staged? Skip the 170MB download — this runs on EVERY package build.
+if [ -d "$DEST/OBS.app" ] && [ "$(cat "$STAMP" 2>/dev/null || true)" = "${OBS_VERSION}-${VARIANT}" ] && [ -z "${OBS_FORCE:-}" ]; then
+  echo "fetch-obs-mac: OBS ${OBS_VERSION} (${VARIANT}) already staged — skipping download (OBS_FORCE=1 to re-fetch)"
+  exit 0
+fi
+
 DMG="OBS-Studio-${OBS_VERSION}-macOS-${VARIANT}.dmg"
 URL="https://github.com/obsproject/obs-studio/releases/download/${OBS_VERSION}/${DMG}"
 TMP_DMG="$(mktemp -t obs).dmg"
@@ -50,4 +58,5 @@ echo "fetch-obs-mac: ad-hoc re-signing (local launchability) …"
 codesign --force --deep --sign - "$DEST/OBS.app" 2>/dev/null \
   || echo "fetch-obs-mac: ad-hoc sign skipped (codesign unavailable) — fine in CI"
 
+echo "${OBS_VERSION}-${VARIANT}" > "$STAMP"
 echo "fetch-obs-mac: done → $DEST/OBS.app"

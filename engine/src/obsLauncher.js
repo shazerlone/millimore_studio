@@ -77,10 +77,12 @@ function mergeIni(file, section, entries) {
 }
 
 /**
- * Prepare OBS's global config so the engine runs invisibly: skip the first-run
- * wizard on fresh machines, and disable the tray/menu-bar icon — the window is
- * hidden at launch (macOS `open -j`), so with the tray off there is NOTHING of
- * OBS for the user to see.
+ * Prepare OBS's global config so the engine runs out of sight: skip the
+ * first-run wizard on fresh machines and force minimize-to-tray. OBS ignores
+ * macOS's "launch hidden" flag (it explicitly shows its window on startup),
+ * so tray-minimize is the RELIABLE way to keep the window off the screen —
+ * the sole visible trace is a small menu-bar glyph, which the trader must
+ * never close (closing the window quits OBS and kills the stream).
  */
 function seedObsConfig() {
   const globalIni = path.join(obsConfigRoot(), 'global.ini')
@@ -88,8 +90,9 @@ function seedObsConfig() {
     mergeIni(globalIni, 'General', { FirstRun: 'true', LastVersion: '503316483' })
   }
   mergeIni(globalIni, 'BasicWindow', {
-    SysTrayEnabled: 'false',
-    SysTrayWhenStarted: 'false'
+    SysTrayEnabled: 'true',
+    SysTrayWhenStarted: 'true',
+    SysTrayMinimizeToTray: 'true'
   })
 }
 
@@ -196,16 +199,17 @@ async function ensureObs({ port = 4455 } = {}) {
   seedObsConfig()
   writeWebsocketConfig(port)
 
-  // Launch OBS truly invisibly. On macOS, `open -j` starts the app in the
-  // OS-level "hidden" state (like Cmd+H): no window on screen — and with the
-  // tray disabled (seedObsConfig) and LSUIElement set on the bundled copy
-  // (no dock icon, no app switcher), nothing of OBS is visible at all.
+  // Launch OBS out of sight: window minimized straight into the tray (the
+  // reliable mechanism — see seedObsConfig), no dock icon on the bundled copy
+  // (LSUIElement), launched in the background without stealing focus.
   const macAppBundle =
     process.platform === 'darwin' ? binary.replace(/\/Contents\/MacOS\/[^/]+$/, '') : null
   if (macAppBundle && macAppBundle !== binary) {
-    spawn('open', ['-n', '-g', '-j', '-a', macAppBundle, '--args', '--disable-shutdown-check'], {
-      stdio: 'ignore'
-    })
+    spawn(
+      'open',
+      ['-n', '-g', '-j', '-a', macAppBundle, '--args', '--minimize-to-tray', '--disable-shutdown-check'],
+      { stdio: 'ignore' }
+    )
   } else {
     // Windows/Linux (and bare mac binaries): spawn directly, minimized.
     const child = spawn(binary, ['--minimize-to-tray', '--disable-shutdown-check'], {

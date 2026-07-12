@@ -19,6 +19,9 @@ function start({ obsUrl, obsPassword } = {}) {
     url: obsUrl || process.env.MILLIMORE_OBS_URL || `ws://127.0.0.1:${OBS_PORT}`,
     password: obsPassword || process.env.MILLIMORE_OBS_PASSWORD
   })
+  // Self-healing hook: if OBS quits/crashes mid-session, any engine call
+  // relaunches it (hidden) and reconnects instead of erroring to the app.
+  engine.ensureUp = () => ensureObs({ port: OBS_PORT })
   const wss = new WebSocketServer({ host: '127.0.0.1', port: PORT })
   const destinations = []
   // Latest overlay state (trade / scene / config) — replayed to the OBS

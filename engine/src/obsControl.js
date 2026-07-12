@@ -49,14 +49,24 @@ class ObsControl {
     this._video = VIDEO['720p30']
     this.screenActive = false
     this._lastStats = null
+    // Hook set by the server: relaunches OBS if its process is gone. Used by
+    // the self-healing path in _call().
+    this.ensureUp = null
+    // Register listeners ONCE here — connect() can run many times (reconnects)
+    // and re-registering there would stack duplicate handlers.
+    this.obs.on('ConnectionClosed', () => {
+      this.connected = false
+    })
+    this.obs.on('StreamStateChanged', (e) => this._streamStateCb?.(e))
   }
 
   /**
-   * obs.call with automatic retry. Right after launch, OBS's socket accepts
-   * connections BEFORE the core is ready, so calls fail with "OBS is not ready
-   * to perform the request" — and canvas changes fail with "output is active"
-   * for a beat after a stream stops. Both are transient; retry instead of
-   * surfacing them to the user.
+   * obs.call with automatic retry and SELF-HEALING. Right after launch, OBS's
+   * socket accepts connections before the core is ready ("not ready"), canvas
+   * changes fail for a beat after a stream stops ("output is active"), and if
+   * OBS itself quits or crashes the socket goes dead ("Not connected") — for
+   * that last case we relaunch OBS (via ensureUp) and reconnect, so the app
+   * never needs to know the engine hiccuped.
    */
   async _call(request, data, { tries = 30, delay = 500 } = {}) {
     for (let i = 0; ; i++) {
@@ -64,7 +74,17 @@ class ObsControl {
         return await this.obs.call(request, data)
       } catch (err) {
         const msg = String(err?.message || '')
-        const transient = /not ready|output is active/i.test(msg)
+        const dead = /not connected|socket not identified|connection closed/i.test(msg)
+        if (dead) {
+          this.connected = false
+          try {
+            if (this.ensureUp) await this.ensureUp() // relaunch OBS if gone
+            await this.connect()
+          } catch {
+            /* still down — the retry loop below paces us */
+          }
+        }
+        const transient = dead || /not ready|output is active/i.test(msg)
         if (!transient || i >= tries - 1) throw err
         await new Promise((r) => setTimeout(r, delay))
       }
@@ -83,12 +103,6 @@ class ObsControl {
     )
     this.connected = true
     this._wsVersion = obsWebSocketVersion
-    this.obs.on('ConnectionClosed', () => {
-      this.connected = false
-    })
-    // Real stream lifecycle from OBS itself, so the app never drifts out of
-    // sync with what the engine is actually doing.
-    this.obs.on('StreamStateChanged', (e) => this._streamStateCb?.(e))
     const { inputKinds } = await this._call('GetInputKindList')
     this.inputKinds = inputKinds || []
     return { obsWebSocketVersion, negotiatedRpcVersion, inputKinds: this.inputKinds }

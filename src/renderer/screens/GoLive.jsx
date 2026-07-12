@@ -427,6 +427,8 @@ export function GoLive() {
           'Couldn’t capture your screen. Enable Screen Recording for Millimore in System Settings → Privacy & Security, then restart the app.'
       } else if (/destination/i.test(raw)) {
         msg = 'No stream destinations. Add at least one stream key.'
+      } else if (/not connected|engine timeout|engine not ready/i.test(raw)) {
+        msg = 'The streaming engine is restarting — give it a few seconds and click Go Live again.'
       } else {
         msg = raw || 'Couldn’t go live. Please try again.'
       }
