@@ -24,20 +24,18 @@ app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
 
 let powerBlockerId = null
 import Store from 'electron-store'
-import { MultistreamEngine, testConnectionSpeed, RTMP_ENDPOINTS } from './ffmpeg.js'
-import { EngineClient } from './engineClient.js'
+import { MultistreamEngine, testConnectionSpeed } from './ffmpeg.js'
+import { NativeEngine } from './nativeEngine.js'
 import { MT5Manager } from './mt5.js'
 import { OverlayManager } from './overlay.js'
 
 const store = new Store({ name: 'millimore-settings' })
 const keyStore = new Store({ name: 'millimore-keys' })
 
-const engine = new MultistreamEngine() // legacy FFmpeg path (fallback)
-const streamEngine = new EngineClient() // OBS engine (primary)
+const engine = new MultistreamEngine() // legacy renderer-fed path (fallback)
+const nativeEngine = new NativeEngine() // Millimore Native Engine (primary)
 const mt5 = new MT5Manager()
 const overlay = new OverlayManager()
-
-let engineStatsTimer = null
 
 let mainWindow = null
 
@@ -286,26 +284,18 @@ function wireEvents() {
   engine.on('status', (s) => send('stream:status', s))
   engine.on('stats', (s) => send('stream:stats', s))
 
-  // OBS engine → renderer (status + live stats). The helper's stray logs are
-  // useful when diagnosing, so surface them to the main console.
-  streamEngine.on('message', (m) => {
-    if (m.type === 'stats') send('engine:stats', m)
-    else send('engine:status', m)
-  })
-  streamEngine.on('status', (s) => send('engine:status', s))
-  streamEngine.on('log', (l) => {
-    const line = String(l).trim()
-    console.log('[engine]', line)
-    // Persist for support — in the packaged app there is no console to read.
-    try {
-      const { appendFileSync, mkdirSync } = require('node:fs')
-      const dir = app.getPath('logs')
-      mkdirSync(dir, { recursive: true })
-      appendFileSync(join(dir, 'engine.log'), `${new Date().toISOString()} ${line}\n`)
-    } catch {
-      /* logging must never break streaming */
+  // Native engine → renderer (status + live stats).
+  nativeEngine.on('status', (s) => {
+    send('engine:status', s)
+    if (s.state === 'error' || s.state === 'stopped') {
+      streaming = false
+      if (powerBlockerId !== null && powerSaveBlocker.isStarted(powerBlockerId)) {
+        powerSaveBlocker.stop(powerBlockerId)
+        powerBlockerId = null
+      }
     }
   })
+  nativeEngine.on('stats', (s) => send('engine:stats', s))
 
   mt5.on('status', (s) => send('mt5:status', s))
   mt5.on('trade', (trade) => {
@@ -456,83 +446,36 @@ ipcMain.on('stream:chunk', (_e, buffer) => engine.pushChunk(buffer))
 ipcMain.on('stream:audio', (_e, buffer) => engine.pushAudio(buffer))
 ipcMain.handle('stream:testSpeed', () => testConnectionSpeed())
 
-// ---- IPC: OBS engine (primary streaming path) --------------------------
-
-/** Resolve enabled destinations → OBS rtmp_custom targets, real keys first. */
-function resolveTargets(destinations = []) {
-  return destinations
-    .filter((d) => RTMP_ENDPOINTS[d.platform] && (d.key || '').trim())
-    // OBS streams a single output for now (multistream is a later mission), so
-    // put the trader's real destination (YouTube/FB/IG) ahead of the millimore
-    // relay placeholder.
-    .sort((a, b) => (a.platform === 'millimore' ? 1 : 0) - (b.platform === 'millimore' ? 1 : 0))
-    .map((d) => ({ url: RTMP_ENDPOINTS[d.platform].replace(/\/+$/, ''), key: d.key.trim() }))
-}
-
-/** file:// URL of the broadcast overlay page (ships with the engine). */
-function overlayPageUrl() {
-  const { pathToFileURL } = require('node:url')
-  const page = app.isPackaged
-    ? join(process.resourcesPath, 'engine', 'overlay', 'index.html')
-    : join(__dirname, '..', '..', 'engine', 'overlay', 'index.html')
-  const port = process.env.MILLIMORE_ENGINE_PORT || 28112
-  return `${pathToFileURL(page).href}#port=${port}`
-}
+// ---- IPC: Millimore Native Engine (primary streaming path) -------------
 
 ipcMain.handle('engine:goLive', async (_e, config = {}) => {
-  const targets = resolveTargets(config.destinations)
-  if (!targets.length) throw new Error('No stream destinations. Add at least one stream key.')
-
-  // Launch the helper (which launches + configures OBS), then build the scene.
-  await streamEngine.launch()
-  await streamEngine.init()
-  await streamEngine.setVideo(config.quality || '720p30')
-  if (config.screenShared) await streamEngine.setScreen({})
-  else await streamEngine.clearScreen()
-  await streamEngine.setCamera(config.cameraLabel || '')
-  await streamEngine.setMicrophone(config.micLabel || '')
-  await streamEngine.setDesktopAudio('').catch(() => {})
-  // Trade cards / ticker / watermark / scenes — composited by OBS on top.
-  await streamEngine.setOverlay(overlayPageUrl()).catch((err) => {
-    console.log('[engine] overlay skipped:', err.message)
-  })
-  await streamEngine.setDestinations(targets)
-  if (config.record) await streamEngine.startRecording().catch(() => {})
-  await streamEngine.start()
-
+  const cfg = { ...config }
+  if (cfg.record) {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+    cfg.recordPath = join(app.getPath('videos'), `Millimore-${stamp}.mkv`)
+  }
+  const res = await nativeEngine.start(cfg)
   streaming = true
   if (powerBlockerId === null || !powerSaveBlocker.isStarted(powerBlockerId)) {
     powerBlockerId = powerSaveBlocker.start('prevent-display-sleep')
   }
-  // Poll OBS for live health while streaming.
-  clearInterval(engineStatsTimer)
-  engineStatsTimer = setInterval(() => streamEngine.requestStats(), 2000)
-  return { ok: true, targets: targets.length }
+  return { ...res, recordPath: cfg.recordPath || null }
 })
 
-// Overlay state (trade / scene / ticker config) → the broadcast overlay page.
-ipcMain.on('engine:overlayEvent', (_e, payload) => streamEngine.overlayEvent(payload || {}))
+// Latest overlay snapshot (RGBA frame painted by the renderer) → the engine's
+// overlay layer on the broadcast.
+ipcMain.on('engine:overlayFrame', (_e, data) => {
+  nativeEngine.setOverlayFrame(Buffer.isBuffer(data) ? data : Buffer.from(data.buffer || data))
+})
 
-// Live device switching while streaming (by device label).
-ipcMain.handle('engine:setCamera', (_e, label) => streamEngine.setCamera(label || ''))
-ipcMain.handle('engine:setMicrophone', (_e, label) => streamEngine.setMicrophone(label || ''))
-
-ipcMain.handle('engine:stop', async () => {
-  clearInterval(engineStatsTimer)
-  engineStatsTimer = null
+ipcMain.handle('engine:stop', () => {
   streaming = false
   pinMonitor(false)
   if (powerBlockerId !== null && powerSaveBlocker.isStarted(powerBlockerId)) {
     powerSaveBlocker.stop(powerBlockerId)
     powerBlockerId = null
   }
-  try {
-    await streamEngine.stopRecording().catch(() => {})
-    await streamEngine.stop()
-  } catch {
-    /* already stopped */
-  }
-  return { ok: true }
+  return nativeEngine.stop()
 })
 
 // ---- IPC: MT5 ----------------------------------------------------------
@@ -608,15 +551,6 @@ app.whenReady().then(() => {
   wireEvents()
   createWindow()
   createTray()
-  // Pre-warm the streaming engine: boot the helper + hidden OBS in the
-  // background while the trader is still setting up, so Go Live is instant
-  // instead of paying the ~10s OBS cold boot on the first click.
-  setTimeout(() => {
-    streamEngine
-      .launch()
-      .then(() => streamEngine.init())
-      .catch((err) => console.log('[engine] prewarm skipped:', err.message))
-  }, 1500)
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
@@ -624,7 +558,7 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   engine.stop()
-  streamEngine.dispose()
+  nativeEngine.stop()
   overlay.dispose()
   if (mt5.isConnected) mt5.disconnect()
   if (process.platform !== 'darwin') app.quit()

@@ -45,13 +45,12 @@ const api = {
     onStats: (cb) => subscribe('stream:stats', cb)
   },
 
-  // ---- OBS engine (primary): Millimore launches + drives OBS, hidden ----
+  // ---- Millimore Native Engine (primary): our own capture→encode→RTMP ----
   engine: {
     goLive: (config) => ipcRenderer.invoke('engine:goLive', config),
     stop: () => ipcRenderer.invoke('engine:stop'),
-    overlayEvent: (payload) => ipcRenderer.send('engine:overlayEvent', payload),
-    setCamera: (label) => ipcRenderer.invoke('engine:setCamera', label),
-    setMicrophone: (label) => ipcRenderer.invoke('engine:setMicrophone', label),
+    // Latest overlay snapshot (RGBA @1280x720) for the broadcast overlay layer.
+    overlayFrame: (data) => ipcRenderer.send('engine:overlayFrame', data),
     onStatus: (cb) => subscribe('engine:status', cb),
     onStats: (cb) => subscribe('engine:stats', cb)
   },

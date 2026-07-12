@@ -11,7 +11,7 @@ const FFMPEG_PATH = (ffmpegStatic || '').replace('app.asar', 'app.asar.unpacked'
 // macOS → VideoToolbox (Intel Quick Sync + Apple Silicon). Windows/Linux →
 // NVENC / QSV / AMF if present, else software libx264.
 let _cachedEncoder = null
-function detectEncoder() {
+export function detectEncoder() {
   if (_cachedEncoder) return _cachedEncoder
   if (process.platform === 'darwin') {
     _cachedEncoder = 'h264_videotoolbox'
@@ -30,7 +30,7 @@ function detectEncoder() {
 }
 
 /** Encoder-specific quality/latency flags (bitrate flags added by the caller). */
-function encoderArgs(encoder) {
+export function encoderArgs(encoder) {
   switch (encoder) {
     case 'h264_videotoolbox':
       return ['-c:v', 'h264_videotoolbox', '-realtime', '1', '-allow_sw', '1', '-profile:v', 'high']

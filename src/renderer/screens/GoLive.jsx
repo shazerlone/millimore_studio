@@ -21,6 +21,7 @@ import { CoachMarks, GO_LIVE_TOUR } from '@components/CoachMarks'
 import { destinations as DESTS, qualityOptions } from '../data/mock'
 import { formatElapsed } from '../lib/quality'
 import { StreamCompositor } from '../lib/compositor'
+import { OverlayPump } from '../lib/overlayPump'
 import { useApp } from '../store'
 
 export function GoLive() {
@@ -66,6 +67,7 @@ export function GoLive() {
   const cameraStream = useRef(null)
   const screenStream = useRef(null)
   const compositor = useRef(null)
+  const overlayPump = useRef(null)
   const timerRef = useRef(null)
   const startedAt = useRef(null)
   const tradeHideTimer = useRef(null)
@@ -129,8 +131,9 @@ export function GoLive() {
     return stream
   }
 
-  // Apply a device change live: re-acquire locally for the preview, and tell
-  // the OBS engine to switch its capture device (matched by label).
+  // Apply a device change: re-acquire locally for the preview. The engine's
+  // capture devices are fixed per session, so mid-stream changes take effect
+  // on the next Go Live (be upfront about it).
   const changeDevice = async (kind, id) => {
     if (kind === 'cam') setCamId(id)
     else setMicId(id)
@@ -140,10 +143,7 @@ export function GoLive() {
         const stream = await acquireCamera()
         if (isLive) {
           compositor.current?.setCameraStream(stream)
-          const list = kind === 'cam' ? devices.cams : devices.mics
-          const label = list.find((d) => d.deviceId === id)?.label || ''
-          if (kind === 'cam') await bridge?.engine.setCamera(label)
-          else await bridge?.engine.setMicrophone(label)
+          pushToast('Device change will apply the next time you go live.', 'info', 5000)
         }
       } catch (err) {
         console.error('Device switch failed:', err)
@@ -183,19 +183,16 @@ export function GoLive() {
   useEffect(() => {
     if (!bridge) return
     const offStatus = bridge.engine.onStatus((s) => {
-      if (s.state === 'starting-obs') pushToast('Starting the streaming engine…', 'info', 3000)
-      else if (s.state === 'engine-exit') {
-        pushToast('Streaming engine stopped unexpectedly.', 'error', 8000)
-        actionsRef.current.stopStream?.()
+      if (s.state === 'encoder') {
+        const hw = s.encoder && s.encoder !== 'libx264'
+        pushToast(hw ? `Hardware encoding active (${s.encoder})` : 'Using software encoding', hw ? 'success' : 'info', 4000)
       } else if (s.state === 'stopped' && isLiveRef.current) {
-        // OBS reported the stream ended (engine-side stop / connection lost) —
-        // keep the UI in lockstep with the real engine state.
+        // The engine reported the stream ended — keep the UI in lockstep.
         actionsRef.current.cleanupAfterStop?.()
-        pushToast('Stream ended.', 'info', 5000)
-      } else if (s.state === 'reconnecting' && isLiveRef.current) {
-        setHealth({ state: 'unstable', message: 'Connection dropped — reconnecting…' })
-      } else if (s.type === 'error') {
+        pushToast(s.message || 'Stream ended.', 'info', 5000)
+      } else if (s.state === 'error') {
         pushToast(s.message || 'Streaming engine error.', 'error', 8000)
+        if (isLiveRef.current) actionsRef.current.cleanupAfterStop?.()
       }
     })
     const offStats = bridge.engine.onStats((s) => {
@@ -214,18 +211,6 @@ export function GoLive() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bridge])
-
-  // Mirror overlay state (trade card / ticker / watermark / scene) onto the
-  // BROADCAST: the engine fans it out to the OBS browser-source page, which
-  // paints it over the stream with the same painter as the preview.
-  useEffect(() => {
-    if (!bridge || !isLive) return
-    bridge.engine.overlayEvent({
-      config: overlayConfig,
-      trade: overlayEnabled ? overlayTrade : null,
-      scene
-    })
-  }, [bridge, isLive, overlayTrade, overlayEnabled, overlayConfig, scene])
 
   useEffect(() => () => {
     clearInterval(timerRef.current)
@@ -375,35 +360,44 @@ export function GoLive() {
     }))
     try {
       if (bridge) {
-        // The OBS engine captures + encodes + streams natively (screen, camera,
-        // mic all inside OBS). The canvas compositor stays only to feed the
-        // in-app preview and the floating monitor thumbnail — it no longer
-        // broadcasts, so we prepare it but never beginRecording().
+        // The Native Engine captures + composites + encodes + streams in one
+        // FFmpeg process. The canvas compositor stays only to feed the in-app
+        // preview and the floating monitor thumbnail.
+        const getOverlay = () => ({
+          config: overlayConfigRef.current,
+          trade: overlayTradeRef.current,
+          scene: sceneRef.current
+        })
         compositor.current = new StreamCompositor({
           quality,
-          previewOnly: true, // OBS broadcasts; this canvas only feeds preview/monitor
-          getOverlay: () => ({
-            config: overlayConfigRef.current,
-            trade: overlayTradeRef.current,
-            scene: sceneRef.current
-          }),
+          previewOnly: true, // the engine broadcasts; this canvas is preview-only
+          getOverlay,
           onThumbnail: (url) => bridge.monitor.pushPreview(url)
         })
         await compositor.current.prepare(cameraStream.current)
         if (screenSource?.id) await compositor.current.setScreenSource(screenSource.id)
 
-        // Broadcast on the OBS engine. Millimore launches + configures OBS
-        // itself — the trader never opens it. Devices are matched by label
-        // (the only identifier the browser and OBS share).
-        await bridge.engine.goLive({
+        // Overlay layer for the BROADCAST: keep the engine's snapshot fresh.
+        overlayPump.current = new OverlayPump({
+          getOverlay,
+          send: (data) => bridge.engine.overlayFrame(data)
+        })
+        overlayPump.current.start()
+
+        // Devices are matched by label (the only identifier the browser and
+        // the native capture APIs share). Screen index from the picked source.
+        const screenIdx = Number((screenSource?.name || '').match(/\b(\d+)\b/)?.[1] || 1) - 1
+        const startRes = await bridge.engine.goLive({
           quality,
           destinations: dests,
           title,
           screenShared: !!screenSource?.id,
+          screenIndex: Math.max(0, screenIdx),
           cameraLabel: devices.cams.find((d) => d.deviceId === camId)?.label || '',
           micLabel: devices.mics.find((d) => d.deviceId === micId)?.label || '',
           record: recordEnabled
         })
+        if (startRes?.recordPath) pushToast(`Recording to ${startRes.recordPath}`, 'info', 6000)
       }
       setIsLive(true)
       startTimer()
@@ -417,6 +411,8 @@ export function GoLive() {
       // Roll back any partial start.
       compositor.current?.stop()
       compositor.current = null
+      overlayPump.current?.stop()
+      overlayPump.current = null
       await bridge?.engine.stop().catch(() => {})
 
       const raw = err?.message || ''
@@ -442,6 +438,8 @@ export function GoLive() {
   const cleanupAfterStop = () => {
     compositor.current?.stop()
     compositor.current = null
+    overlayPump.current?.stop()
+    overlayPump.current = null
     clearInterval(timerRef.current)
     clearTimeout(tradeHideTimer.current)
     setElapsed('00:00:00')

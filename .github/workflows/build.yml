@@ -50,14 +50,11 @@ jobs:
           cache: npm
       - name: Install dependencies
         run: npm ci
-      - name: Install engine (helper) dependencies
-        # The OBS-control helper is bundled via extraResources; it needs its own
-        # node_modules (obs-websocket-js, ws) present at package time.
-        run: cd engine && npm ci
       - name: Fetch FFmpeg binary for ${{ matrix.arch }}
-        # ffmpeg-static's installer skips the download if the binary already
-        # exists, so `npm ci` leaves the runner's (arm64) binary in place. Delete
-        # it and re-run the installer for the TARGET arch, then verify.
+        # ffmpeg-static IS the Millimore Native Engine (capture → composite →
+        # hardware encode → RTMP tee). The installer skips the download if the
+        # binary already exists, so `npm ci` leaves the runner's (arm64) binary
+        # in place. Delete it and re-run for the TARGET arch, then verify.
         run: |
           rm -f node_modules/ffmpeg-static/ffmpeg
           node node_modules/ffmpeg-static/install.js
@@ -66,10 +63,6 @@ jobs:
         env:
           npm_config_arch: ${{ matrix.arch }}
           npm_config_platform: darwin
-      - name: Bundle OBS engine (hidden) for ${{ matrix.arch }}
-        # Download OBS, hide it (LSUIElement — no dock icon), stage it in
-        # resources/obs so it ships inside Millimore. Users install nothing else.
-        run: bash scripts/fetch-obs-mac.sh ${{ matrix.arch }}
       - name: Build bundles
         run: npm run build
       - name: Package (.dmg + .zip)
