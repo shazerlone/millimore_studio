@@ -22,10 +22,13 @@ export function probeEncoder() {
         : []
   for (const enc of candidates) {
     try {
+      // Probe with the SAME flags we stream with (e.g. -allow_sw for
+      // VideoToolbox) and a realistic frame size — a bare/tiny probe can fail
+      // on encoders that would work fine in production.
       execFileSync(
         FFMPEG,
-        ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'color=c=black:s=128x128:r=10', '-frames:v', '3', '-c:v', enc, '-f', 'null', '-'],
-        { timeout: 15000, stdio: 'ignore' }
+        ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'color=c=black:s=640x360:r=30', '-frames:v', '5', ...encoderArgs(enc), '-b:v', '1500k', '-f', 'null', '-'],
+        { timeout: 20000, stdio: 'ignore' }
       )
       _probedEncoder = enc
       return enc
@@ -160,13 +163,16 @@ export class NativeEngine extends EventEmitter {
     this.userStopped = false
     this._progress = ''
     this._lastProgress = null
+    this.emit('log', 'ffmpeg ' + args.join(' '))
     // fd3 = overlay RGBA in; stdout = progress; stderr = logs.
     this.proc = spawn(FFMPEG, args, { stdio: ['ignore', 'pipe', 'pipe', 'pipe'] })
     this.proc.stdio[3].on('error', () => {})
     this.proc.stdout.on('data', (d) => this._onProgress(d.toString()))
     let errTail = ''
     this.proc.stderr.on('data', (d) => {
-      errTail = (errTail + d.toString()).slice(-4000)
+      const text = d.toString()
+      errTail = (errTail + text).slice(-4000)
+      this.emit('log', text.trim())
     })
     this.proc.on('error', (err) => this.emit('status', { state: 'error', message: err.message }))
     this.proc.on('close', (code) => {
@@ -192,7 +198,11 @@ export class NativeEngine extends EventEmitter {
     if (!ok) {
       const tail = lastErrorLine(errTail)
       this.stop()
-      throw new Error('The stream did not start sending data. ' + tail)
+      // Work out WHICH capture device failed so the trader gets a fix, not a
+      // riddle (probe each input separately after the main process is gone).
+      await new Promise((r) => setTimeout(r, 600))
+      const diag = await this._diagnose(c, devices).catch(() => '')
+      throw new Error(diag || 'The stream did not start sending data. ' + tail)
     }
     this.live = true
     this.emit('status', { state: 'live', destinations: targets.length, quality: c.quality })
@@ -214,7 +224,9 @@ export class NativeEngine extends EventEmitter {
       const cams = devices.video.filter((d) => !/capture screen/i.test(d.label))
       const cam = this._match(cams, c.cameraLabel, cams[0])
       const mic = this._match(devices.audio, c.micLabel, devices.audio[0])
-      const micIdx = mic ? mic.index : 'default'
+      // avfoundation has no "default" keyword — if we can't resolve a mic,
+      // stream video-only rather than passing a bogus device spec.
+      const micIdx = mic ? mic.index : 'none'
 
       // NOTE: no -pixel_format — let avfoundation pick each device's native
       // format (forcing one errors out on devices that don't support it).
@@ -230,7 +242,7 @@ export class NativeEngine extends EventEmitter {
           '-i', `${screen.index}:${micIdx}`
         )
         vIn = nextInput++
-        audioMap = `${vIn}:a`
+        if (mic) audioMap = `${vIn}:a`
         if (cam) {
           args.push('-f', 'avfoundation', '-thread_queue_size', '1024', '-i', `${cam.index}:none`)
           camIn = nextInput++
@@ -240,7 +252,7 @@ export class NativeEngine extends EventEmitter {
         // Camera-only: camera (video) + mic (audio) in one input.
         args.push('-f', 'avfoundation', '-thread_queue_size', '1024', '-i', `${cam.index}:${micIdx}`)
         vIn = nextInput++
-        audioMap = `${vIn}:a`
+        if (mic) audioMap = `${vIn}:a`
       }
     } else if (process.platform === 'win32') {
       const cam = this._match(devices.video, c.cameraLabel, devices.video[0])
@@ -342,6 +354,54 @@ export class NativeEngine extends EventEmitter {
     )
     this._nominalKbps = (parseInt(preset.videoBitrate) || 0) + (parseInt(preset.audioBitrate) || 0)
     return args
+  }
+
+  /** Try one capture input alone for half a second; report its exact error. */
+  _probeInput(inputArgs) {
+    return new Promise((resolve) => {
+      execFile(
+        FFMPEG,
+        ['-hide_banner', '-loglevel', 'error', ...inputArgs, '-t', '0.6', '-f', 'null', '-'],
+        { timeout: 15000 },
+        (e, _o, stderr) =>
+          resolve({
+            ok: !e,
+            err: String(stderr || '').trim().split('\n').filter(Boolean).slice(-2).join(' ')
+          })
+      )
+    })
+  }
+
+  /** Pinpoint which device (screen/camera/mic) macOS refused, with the fix. */
+  async _diagnose(c, devices) {
+    if (process.platform !== 'darwin') return ''
+    const out = []
+    const screens = devices.video.filter((d) => /capture screen/i.test(d.label))
+    const cams = devices.video.filter((d) => !/capture screen/i.test(d.label))
+    const cam = this._match(cams, c.cameraLabel, cams[0])
+    const mic = this._match(devices.audio, c.micLabel, devices.audio[0])
+    if (c.screenShared && screens[0]) {
+      const r = await this._probeInput(['-f', 'avfoundation', '-framerate', '30', '-i', `${screens[0].index}:none`])
+      if (!r.ok)
+        out.push(
+          `Screen capture failed — enable Screen Recording for Millimore in System Settings → Privacy & Security, then RESTART the app. (${r.err})`
+        )
+    }
+    if (cam) {
+      const r = await this._probeInput(['-f', 'avfoundation', '-i', `${cam.index}:none`])
+      if (!r.ok)
+        out.push(
+          `Camera "${cam.label}" failed — enable Camera for Millimore in System Settings → Privacy & Security. (${r.err})`
+        )
+    }
+    if (mic) {
+      const r = await this._probeInput(['-f', 'avfoundation', '-i', `none:${mic.index}`])
+      if (!r.ok)
+        out.push(
+          `Microphone "${mic.label}" failed — enable Microphone for Millimore in System Settings → Privacy & Security. (${r.err})`
+        )
+    }
+    return out.join(' ')
   }
 
   /** Renderer pushes a new overlay snapshot (RGBA, OVERLAY_W×OVERLAY_H). */

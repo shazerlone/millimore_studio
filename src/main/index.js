@@ -296,6 +296,18 @@ function wireEvents() {
     }
   })
   nativeEngine.on('stats', (s) => send('engine:stats', s))
+  nativeEngine.on('log', (line) => {
+    console.log('[engine]', line)
+    // Persist for support — in the packaged app there is no console to read.
+    try {
+      const { appendFileSync, mkdirSync } = require('node:fs')
+      const dir = app.getPath('logs')
+      mkdirSync(dir, { recursive: true })
+      appendFileSync(join(dir, 'engine.log'), `${new Date().toISOString()} ${line}\n`)
+    } catch {
+      /* logging must never break streaming */
+    }
+  })
 
   mt5.on('status', (s) => send('mt5:status', s))
   mt5.on('trade', (trade) => {
