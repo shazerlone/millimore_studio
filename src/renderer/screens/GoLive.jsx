@@ -20,7 +20,7 @@ import { TradePlacement } from '@components/TradePlacement'
 import { CoachMarks, GO_LIVE_TOUR } from '@components/CoachMarks'
 import { destinations as DESTS, qualityOptions } from '../data/mock'
 import { formatElapsed } from '../lib/quality'
-import { OverlayPump } from '../lib/overlayPump'
+import { StreamCompositor } from '../lib/compositor'
 import { useApp } from '../store'
 
 export function GoLive() {
@@ -66,7 +66,6 @@ export function GoLive() {
   const cameraStream = useRef(null)
   const screenStream = useRef(null)
   const compositor = useRef(null)
-  const overlayPump = useRef(null)
   const timerRef = useRef(null)
   const startedAt = useRef(null)
   const tradeHideTimer = useRef(null)
@@ -171,43 +170,6 @@ export function GoLive() {
       }
       if (s.state === 'error') pushToast(s.message || 'Streaming error.', 'error', 8000)
     })
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bridge])
-
-  // OBS engine status + live health (congestion / dropped frames).
-  const isLiveRef = useRef(false)
-  useEffect(() => {
-    isLiveRef.current = isLive
-  }, [isLive])
-  useEffect(() => {
-    if (!bridge) return
-    const offStatus = bridge.engine.onStatus((s) => {
-      if (s.state === 'encoder') {
-        const hw = s.encoder && s.encoder !== 'libx264'
-        pushToast(hw ? `Hardware encoding active (${s.encoder})` : 'Using software encoding', hw ? 'success' : 'info', 4000)
-      } else if (s.state === 'stopped' && isLiveRef.current) {
-        // The engine reported the stream ended — keep the UI in lockstep.
-        actionsRef.current.cleanupAfterStop?.()
-        pushToast(s.message || 'Stream ended.', 'info', 5000)
-      } else if (s.state === 'error') {
-        pushToast(s.message || 'Streaming engine error.', 'error', 8000)
-        if (isLiveRef.current) actionsRef.current.cleanupAfterStop?.()
-      }
-    })
-    const offStats = bridge.engine.onStats((s) => {
-      const droppedPct = s.totalFrames ? (s.skippedFrames / s.totalFrames) * 100 : 0
-      // Surface sustained trouble the way the FFmpeg path did (stats bar itself
-      // is fed from the store).
-      if ((s.congestion ?? 0) >= 0.8 || droppedPct > 5) {
-        setHealth({ state: 'unstable', message: 'Upload is congested — try a lower quality.' })
-      } else {
-        setHealth(null)
-      }
-    })
-    return () => {
-      offStatus?.()
-      offStats?.()
-    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bridge])
 
@@ -359,49 +321,35 @@ export function GoLive() {
     }))
     try {
       if (bridge) {
-        // The Native Engine captures + composites + encodes + streams in one
-        // FFmpeg process. The canvas compositor stays only to feed the in-app
-        // preview and the floating monitor thumbnail.
-        const getOverlay = () => ({
-          config: overlayConfigRef.current,
-          trade: overlayTradeRef.current,
-          scene: sceneRef.current
+        // Capture happens INSIDE this window (getUserMedia/getDisplayMedia —
+        // permissions work here, which is why the preview shows your camera).
+        // We composite screen + camera PiP + the trade-card/ticker overlay on a
+        // canvas, then hand the finished video to the engine, which only
+        // hardware-encodes it once and tees it to every destination. FFmpeg
+        // never touches the camera, so macOS never blocks it.
+        compositor.current = new StreamCompositor({
+          quality,
+          getOverlay: () => ({
+            config: overlayConfigRef.current,
+            trade: overlayTradeRef.current,
+            scene: sceneRef.current
+          }),
+          onThumbnail: (url) => bridge.monitor.pushPreview(url)
         })
+        const { mode, audio } = await compositor.current.prepare(cameraStream.current)
+        if (screenSource?.id) await compositor.current.setScreenSource(screenSource.id)
 
-        // CRITICAL: the Native Engine captures the camera/mic/screen DIRECTLY.
-        // The preview is currently holding those devices open (that's why you
-        // see yourself), and macOS won't let FFmpeg open a camera/mic that's
-        // already in use — it fails with "Input/output error". So release the
-        // renderer's grip on every capture device before the engine starts.
-        cameraStream.current?.getTracks().forEach((t) => t.stop())
-        cameraStream.current = null
-        setCamStream(null)
-        setHasCamera(false)
-        screenStream.current?.getTracks().forEach((t) => t.stop())
-        screenStream.current = null
-        // Give macOS a beat to fully hand the devices back before FFmpeg opens them.
-        await new Promise((r) => setTimeout(r, 300))
-
-        // Overlay layer for the BROADCAST (independent of the camera device).
-        overlayPump.current = new OverlayPump({
-          getOverlay,
-          send: (data) => bridge.engine.overlayFrame(data)
-        })
-        overlayPump.current.start()
-
-        // Devices are matched by label (the only identifier the browser and
-        // the native capture APIs share). Screen index from the picked source.
-        const screenIdx = Number((screenSource?.name || '').match(/\b(\d+)\b/)?.[1] || 1) - 1
-        const startRes = await bridge.engine.goLive({
+        // Start the engine (FFmpeg: transcode once → tee to all destinations +
+        // optional local recording), then feed it the composited frames.
+        const startRes = await bridge.stream.start({
           quality,
           destinations: dests,
           title,
-          screenShared: !!screenSource?.id,
-          screenIndex: Math.max(0, screenIdx),
-          cameraLabel: devices.cams.find((d) => d.deviceId === camId)?.label || '',
-          micLabel: devices.mics.find((d) => d.deviceId === micId)?.label || '',
+          mode,
+          audio,
           record: recordEnabled
         })
+        compositor.current.beginRecording()
         if (startRes?.recordPath) pushToast(`Recording to ${startRes.recordPath}`, 'info', 6000)
       }
       setIsLive(true)
@@ -416,24 +364,17 @@ export function GoLive() {
       // Roll back any partial start.
       compositor.current?.stop()
       compositor.current = null
-      overlayPump.current?.stop()
-      overlayPump.current = null
-      await bridge?.engine.stop().catch(() => {})
-      // We released the camera/mic to hand them to the engine; the start
-      // failed, so bring the preview devices back.
-      acquireCamera().catch(() => {})
+      await bridge?.stream.stop().catch(() => {})
 
       const raw = err?.message || ''
       let msg
-      if (/screen recording|NO_SCREEN/i.test(raw)) {
+      if (raw === 'NO_SCREEN' || /denied|permission|NotAllowed|getUserMedia|NotReadable|screen recording/i.test(raw)) {
         setCaptureError('screen')
         msg =
           'Couldn’t capture your screen. Enable Screen Recording for Millimore in System Settings → Privacy & Security, then restart the app.'
-      } else if (/camera .* failed|enable camera/i.test(raw)) {
+      } else if (/camera/i.test(raw)) {
         setCaptureError('camera')
-        msg = raw
-      } else if (/microphone .* failed|enable microphone/i.test(raw)) {
-        msg = raw
+        msg = 'Couldn’t start your camera. Enable Camera for Millimore in System Settings → Privacy & Security.'
       } else if (/destination/i.test(raw)) {
         msg = 'No stream destinations. Add at least one stream key.'
       } else {
@@ -449,34 +390,17 @@ export function GoLive() {
   const cleanupAfterStop = () => {
     compositor.current?.stop()
     compositor.current = null
-    overlayPump.current?.stop()
-    overlayPump.current = null
     clearInterval(timerRef.current)
     clearTimeout(tradeHideTimer.current)
     setElapsed('00:00:00')
     setOverlayTrade(null)
     setHealth(null)
     setIsLive(false)
-    // The engine released the camera/mic on stop — bring the preview back.
-    acquireCamera().catch(() => {})
   }
 
-  const stopStream = () => {
-    // Flip the UI instantly; the engine tears the output down in the
-    // background (its own 'stopped' event confirms). Give FFmpeg a moment to
-    // release the devices before the preview re-grabs them.
-    compositor.current?.stop()
-    compositor.current = null
-    overlayPump.current?.stop()
-    overlayPump.current = null
-    clearInterval(timerRef.current)
-    clearTimeout(tradeHideTimer.current)
-    setElapsed('00:00:00')
-    setOverlayTrade(null)
-    setHealth(null)
-    setIsLive(false)
-    bridge?.engine.stop().catch(() => {})
-    setTimeout(() => acquireCamera().catch(() => {}), 600)
+  const stopStream = async () => {
+    cleanupAfterStop()
+    await bridge?.stream.stop().catch(() => {})
   }
 
   const activeCount = DESTS.filter((d) => enabled[d.platform]).length
