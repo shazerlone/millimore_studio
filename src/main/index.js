@@ -362,14 +362,25 @@ ipcMain.handle('capture:triggerScreenPrompt', async () => {
   return process.platform === 'darwin' ? systemPreferences.getMediaAccessStatus('screen') : 'granted'
 })
 
-ipcMain.handle('capture:openScreenPrefs', () => {
-  if (process.platform === 'darwin') {
-    shell.openExternal(
-      'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'
-    )
+/** Open a specific Privacy & Security pane. Uses the `open` CLI (reliable) with
+ *  a shell.openExternal fallback. pane: 'screen' | 'camera' | 'microphone'. */
+function openPrivacyPane(pane = 'screen') {
+  if (process.platform !== 'darwin') return { ok: true }
+  const anchor = {
+    screen: 'Privacy_ScreenCapture',
+    camera: 'Privacy_Camera',
+    microphone: 'Privacy_Microphone'
+  }[pane] || 'Privacy_ScreenCapture'
+  const url = `x-apple.systempreferences:com.apple.preference.security?${anchor}`
+  try {
+    require('node:child_process').execFile('open', [url])
+  } catch {
+    shell.openExternal(url)
   }
   return { ok: true }
-})
+}
+ipcMain.handle('capture:openScreenPrefs', () => openPrivacyPane('screen'))
+ipcMain.handle('capture:openPrivacy', (_e, pane) => openPrivacyPane(pane))
 
 ipcMain.handle('app:restart', () => {
   app.relaunch()

@@ -20,7 +20,6 @@ import { TradePlacement } from '@components/TradePlacement'
 import { CoachMarks, GO_LIVE_TOUR } from '@components/CoachMarks'
 import { destinations as DESTS, qualityOptions } from '../data/mock'
 import { formatElapsed } from '../lib/quality'
-import { StreamCompositor } from '../lib/compositor'
 import { OverlayPump } from '../lib/overlayPump'
 import { useApp } from '../store'
 
@@ -368,16 +367,22 @@ export function GoLive() {
           trade: overlayTradeRef.current,
           scene: sceneRef.current
         })
-        compositor.current = new StreamCompositor({
-          quality,
-          previewOnly: true, // the engine broadcasts; this canvas is preview-only
-          getOverlay,
-          onThumbnail: (url) => bridge.monitor.pushPreview(url)
-        })
-        await compositor.current.prepare(cameraStream.current)
-        if (screenSource?.id) await compositor.current.setScreenSource(screenSource.id)
 
-        // Overlay layer for the BROADCAST: keep the engine's snapshot fresh.
+        // CRITICAL: the Native Engine captures the camera/mic/screen DIRECTLY.
+        // The preview is currently holding those devices open (that's why you
+        // see yourself), and macOS won't let FFmpeg open a camera/mic that's
+        // already in use — it fails with "Input/output error". So release the
+        // renderer's grip on every capture device before the engine starts.
+        cameraStream.current?.getTracks().forEach((t) => t.stop())
+        cameraStream.current = null
+        setCamStream(null)
+        setHasCamera(false)
+        screenStream.current?.getTracks().forEach((t) => t.stop())
+        screenStream.current = null
+        // Give macOS a beat to fully hand the devices back before FFmpeg opens them.
+        await new Promise((r) => setTimeout(r, 300))
+
+        // Overlay layer for the BROADCAST (independent of the camera device).
         overlayPump.current = new OverlayPump({
           getOverlay,
           send: (data) => bridge.engine.overlayFrame(data)
@@ -414,17 +419,23 @@ export function GoLive() {
       overlayPump.current?.stop()
       overlayPump.current = null
       await bridge?.engine.stop().catch(() => {})
+      // We released the camera/mic to hand them to the engine; the start
+      // failed, so bring the preview devices back.
+      acquireCamera().catch(() => {})
 
       const raw = err?.message || ''
       let msg
-      if (raw === 'NO_SCREEN' || /denied|permission|NotAllowed|getUserMedia|NotReadable/i.test(raw)) {
+      if (/screen recording|NO_SCREEN/i.test(raw)) {
         setCaptureError('screen')
         msg =
           'Couldn’t capture your screen. Enable Screen Recording for Millimore in System Settings → Privacy & Security, then restart the app.'
+      } else if (/camera .* failed|enable camera/i.test(raw)) {
+        setCaptureError('camera')
+        msg = raw
+      } else if (/microphone .* failed|enable microphone/i.test(raw)) {
+        msg = raw
       } else if (/destination/i.test(raw)) {
         msg = 'No stream destinations. Add at least one stream key.'
-      } else if (/not connected|engine timeout|engine not ready/i.test(raw)) {
-        msg = 'The streaming engine is restarting — give it a few seconds and click Go Live again.'
       } else {
         msg = raw || 'Couldn’t go live. Please try again.'
       }
@@ -446,13 +457,26 @@ export function GoLive() {
     setOverlayTrade(null)
     setHealth(null)
     setIsLive(false)
+    // The engine released the camera/mic on stop — bring the preview back.
+    acquireCamera().catch(() => {})
   }
 
   const stopStream = () => {
     // Flip the UI instantly; the engine tears the output down in the
-    // background (its own 'stopped' event confirms).
-    cleanupAfterStop()
+    // background (its own 'stopped' event confirms). Give FFmpeg a moment to
+    // release the devices before the preview re-grabs them.
+    compositor.current?.stop()
+    compositor.current = null
+    overlayPump.current?.stop()
+    overlayPump.current = null
+    clearInterval(timerRef.current)
+    clearTimeout(tradeHideTimer.current)
+    setElapsed('00:00:00')
+    setOverlayTrade(null)
+    setHealth(null)
+    setIsLive(false)
     bridge?.engine.stop().catch(() => {})
+    setTimeout(() => acquireCamera().catch(() => {}), 600)
   }
 
   const activeCount = DESTS.filter((d) => enabled[d.platform]).length
@@ -592,34 +616,59 @@ export function GoLive() {
               >
                 <InfoIcon size={16} style={{ flexShrink: 0, marginTop: 1 }} />
                 <div style={{ flex: 1 }}>
-                  {captureError === 'camera' && <div style={{ marginBottom: 6 }}>Camera access was blocked.</div>}
-                  <div>
-                    <strong>Couldn’t capture your screen.</strong> On macOS this almost always means
-                    one of two things:
-                  </div>
-                  <ol style={{ margin: '8px 0 0', paddingLeft: 18 }}>
-                    <li>
-                      <strong>Millimore must be in your Applications folder</strong> — if you’re
-                      running it from the disk image or Downloads, macOS won’t keep the permission.
-                      Drag the app to Applications and open it from there.
-                    </li>
-                    <li>
-                      Enable <strong>Screen Recording</strong> for Millimore in System Settings, then
-                      <strong> restart the app</strong> (macOS only applies it after a relaunch).
-                    </li>
-                  </ol>
-                  <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-                    {bridge?.restart && (
-                      <Button size="sm" onClick={() => bridge.restart()}>
-                        Restart Millimore
-                      </Button>
-                    )}
-                    {bridge?.capture?.openScreenPrefs && (
-                      <Button variant="secondary" size="sm" onClick={() => bridge.capture.openScreenPrefs()}>
-                        Open settings
-                      </Button>
-                    )}
-                  </div>
+                  {captureError === 'camera' ? (
+                    <>
+                      <div>
+                        <strong>Couldn’t start your camera.</strong> Enable <strong>Camera</strong> for
+                        Millimore in System Settings → Privacy &amp; Security, then click Go Live again.
+                        If Millimore is running from the disk image or Downloads, drag it to your
+                        Applications folder first — macOS won’t keep the permission otherwise.
+                      </div>
+                      <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                        {bridge?.capture?.openPrivacy && (
+                          <Button size="sm" onClick={() => bridge.capture.openPrivacy('camera')}>
+                            Open Camera settings
+                          </Button>
+                        )}
+                        {bridge?.capture?.openPrivacy && (
+                          <Button variant="secondary" size="sm" onClick={() => bridge.capture.openPrivacy('microphone')}>
+                            Microphone settings
+                          </Button>
+                        )}
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div>
+                        <strong>Couldn’t capture your screen.</strong> On macOS this almost always
+                        means one of two things:
+                      </div>
+                      <ol style={{ margin: '8px 0 0', paddingLeft: 18 }}>
+                        <li>
+                          <strong>Millimore must be in your Applications folder</strong> — if you’re
+                          running it from the disk image or Downloads, macOS won’t keep the
+                          permission. Drag the app to Applications and open it from there.
+                        </li>
+                        <li>
+                          Enable <strong>Screen Recording</strong> for Millimore in System Settings,
+                          then <strong>restart the app</strong> (macOS only applies it after a
+                          relaunch).
+                        </li>
+                      </ol>
+                      <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                        {bridge?.restart && (
+                          <Button size="sm" onClick={() => bridge.restart()}>
+                            Restart Millimore
+                          </Button>
+                        )}
+                        {bridge?.capture?.openScreenPrefs && (
+                          <Button variant="secondary" size="sm" onClick={() => bridge.capture.openScreenPrefs()}>
+                            Open settings
+                          </Button>
+                        )}
+                      </div>
+                    </>
+                  )}
                 </div>
               </div>
             )}

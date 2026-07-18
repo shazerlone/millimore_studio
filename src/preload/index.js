@@ -14,7 +14,8 @@ const api = {
     requestCamera: () => ipcRenderer.invoke('capture:requestCamera'),
     requestMic: () => ipcRenderer.invoke('capture:requestMic'),
     triggerScreenPrompt: () => ipcRenderer.invoke('capture:triggerScreenPrompt'),
-    openScreenPrefs: () => ipcRenderer.invoke('capture:openScreenPrefs')
+    openScreenPrefs: () => ipcRenderer.invoke('capture:openScreenPrefs'),
+    openPrivacy: (pane) => ipcRenderer.invoke('capture:openPrivacy', pane)
   },
   openExternal: (url) => ipcRenderer.invoke('app:openExternal', url),
   restart: () => ipcRenderer.invoke('app:restart'),
