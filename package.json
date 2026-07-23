@@ -54,6 +54,7 @@
       }
     ],
     "icon": "build/icon.png",
+    "afterPack": "build/afterPack.js",
     "mac": {
       "category": "public.app-category.video",
       "icon": "build/icon.png",
@@ -61,10 +62,8 @@
         "dmg",
         "zip"
       ],
-      "hardenedRuntime": true,
+      "hardenedRuntime": false,
       "gatekeeperAssess": false,
-      "entitlements": "build/entitlements.mac.plist",
-      "entitlementsInherit": "build/entitlements.mac.plist",
       "extendInfo": {
         "NSCameraUsageDescription": "Millimore Desktop uses your camera for your live stream's picture-in-picture webcam.",
         "NSMicrophoneUsageDescription": "Millimore Desktop uses your microphone for your live stream audio.",
