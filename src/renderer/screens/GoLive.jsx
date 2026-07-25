@@ -124,7 +124,11 @@ export function GoLive() {
       video: {
         deviceId: camId ? { exact: camId } : undefined,
         width: { ideal: 1920 },
-        frameRate: { ideal: 30 }
+        frameRate: { ideal: 30 },
+        // 'none' tells the browser NOT to pad/letterbox the frame to satisfy a
+        // requested aspect — we want the camera's raw native frame so the
+        // compositor can crop it to fill with no baked-in black bars.
+        resizeMode: 'none'
       },
       audio: micId ? { deviceId: { exact: micId } } : true
     })
