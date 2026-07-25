@@ -120,15 +120,16 @@ export function GoLive() {
     // the driver hand back a frame with black bars baked in; the compositor
     // then crops the camera to fill the canvas itself (drawCover), so we want
     // the raw native-aspect frame with no bars.
+    // Capture at ~720p: light on CPU (keeps the stream fast) and the compositor
+    // crops it to fill the canvas (drawCover), so no black bars. The browser
+    // returns the camera's native aspect regardless of the hint — verified in a
+    // real browser — so there's nothing to pad.
     const stream = await navigator.mediaDevices.getUserMedia({
       video: {
         deviceId: camId ? { exact: camId } : undefined,
-        width: { ideal: 1920 },
-        frameRate: { ideal: 30 },
-        // 'none' tells the browser NOT to pad/letterbox the frame to satisfy a
-        // requested aspect — we want the camera's raw native frame so the
-        // compositor can crop it to fill with no baked-in black bars.
-        resizeMode: 'none'
+        width: { ideal: 1280 },
+        height: { ideal: 720 },
+        frameRate: { ideal: 30 }
       },
       audio: micId ? { deviceId: { exact: micId } } : true
     })

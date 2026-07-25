@@ -145,6 +145,10 @@ export class MultistreamEngine extends EventEmitter {
       '-fflags', '+genpts',
       '-use_wallclock_as_timestamps', '1',
       '-i', 'pipe:0',
+      // Guarantee the broadcast is EXACTLY the target size, filled, with square
+      // pixels — crops away any letterbox/pillarbox rather than shipping bars.
+      // A no-op when the input already matches (the normal case).
+      '-vf', `scale=${preset.width}:${preset.height}:force_original_aspect_ratio=increase,crop=${preset.width}:${preset.height},setsar=1`,
       ...encoderArgs(encoder),
       '-pix_fmt', 'yuv420p',
       '-r', String(fps),
