@@ -115,11 +115,16 @@ export function GoLive() {
   // (Re)acquire the camera + mic using the currently selected devices.
   const acquireCamera = async () => {
     cameraStream.current?.getTracks().forEach((t) => t.stop())
+    // Ask only for a target WIDTH — never force a 16:9 height. Forcing both on a
+    // non-16:9 camera (e.g. the built-in FaceTime, which is ~4:3/square) makes
+    // the driver hand back a frame with black bars baked in; the compositor
+    // then crops the camera to fill the canvas itself (drawCover), so we want
+    // the raw native-aspect frame with no bars.
     const stream = await navigator.mediaDevices.getUserMedia({
       video: {
         deviceId: camId ? { exact: camId } : undefined,
-        width: { ideal: 1280 },
-        height: { ideal: 720 }
+        width: { ideal: 1920 },
+        frameRate: { ideal: 30 }
       },
       audio: micId ? { deviceId: { exact: micId } } : true
     })
