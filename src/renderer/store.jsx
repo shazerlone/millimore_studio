@@ -38,6 +38,7 @@ const DEFAULT_OVERLAY = {
 
 export function AppProvider({ children }) {
   const [authed, setAuthedState] = useState(null) // null = loading from disk
+  const [user, setUser] = useState(null) // logged-in creator (backend /me)
   const [isLive, setIsLive] = useState(false)
   const [mt5Connected, setMt5Connected] = useState(false)
   const [overlayConfig, setOverlayConfig] = useState(DEFAULT_OVERLAY)
@@ -56,8 +57,13 @@ export function AppProvider({ children }) {
     bridge.settings.get('overlayConfig').then((saved) => {
       if (saved) setOverlayConfig((c) => ({ ...c, ...saved }))
     })
-    bridge.settings.get('authed').then((v) => setAuthedState(!!v))
-    bridge.settings.get('onboarded').then((v) => setOnboarded(!!v))
+    // Restore the backend session (persisted JWT → validate with /me).
+    bridge.backend.session().then((s) => {
+      setAuthedState(!!s?.authed)
+      setUser(s?.user || null)
+      if (s?.authed) setOnboarded(true) // a real account skips the demo wizard
+    })
+    bridge.settings.get('onboarded').then((v) => setOnboarded((cur) => (cur === null ? !!v : cur)))
     const offStream = bridge.stream.onStats(setStreamStats)
     // OBS engine health → the same stats surface the UI already renders
     // (LiveStatsBar reads bitrateKbps / fps / dropped).
@@ -79,15 +85,24 @@ export function AppProvider({ children }) {
     }
   }, [])
 
-  // Persist the session so the user stays logged in until they sign out.
+  // Called by the login screen after a successful backend auth. The JWT is
+  // already persisted in the main process; here we just flip UI state.
+  const signIn = (u) => {
+    setUser(u || null)
+    setAuthedState(true)
+    setOnboarded(true)
+  }
+
+  // Kept for compatibility (some flows call setAuthed(true/false)).
   const setAuthed = (v) => {
-    setAuthedState(v)
-    bridge?.settings.set('authed', !!v)
+    setAuthedState(!!v)
+    if (!v) setUser(null)
   }
 
   const signOut = () => {
-    setAuthed(false)
-    bridge?.settings.set('authed', false)
+    bridge?.backend.logout()
+    setUser(null)
+    setAuthedState(false)
   }
 
   const completeOnboarding = () => {
@@ -124,6 +139,8 @@ export function AppProvider({ children }) {
     () => ({
       bridge,
       authed,
+      user,
+      signIn,
       setAuthed,
       signOut,
       isLive,
@@ -141,7 +158,7 @@ export function AppProvider({ children }) {
       pushToast,
       dismissToast
     }),
-    [authed, isLive, mt5Connected, overlayConfig, overlayEnabled, streamStats, onboarded, toasts]
+    [authed, user, isLive, mt5Connected, overlayConfig, overlayEnabled, streamStats, onboarded, toasts]
   )
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>

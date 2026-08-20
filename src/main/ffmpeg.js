@@ -56,6 +56,13 @@ export const RTMP_ENDPOINTS = {
   facebook: 'rtmps://live-api-s.facebook.com:443/rtmp/'
 }
 
+/** Join an RTMP(S) ingest base with a stream key using exactly one slash.
+ *  If the key is empty, the base is assumed to already be complete. */
+export function joinRtmp(url, key) {
+  if (!key) return url
+  return `${url.replace(/\/+$/, '')}/${String(key).replace(/^\/+/, '')}`
+}
+
 export const QUALITY_PRESETS = {
   '720p30': { width: 1280, height: 720, fps: 30, videoBitrate: '3500k', bufSize: '7000k', audioBitrate: '128k' },
   '1080p30': { width: 1920, height: 1080, fps: 30, videoBitrate: '6000k', bufSize: '12000k', audioBitrate: '160k' },
@@ -101,10 +108,10 @@ export class MultistreamEngine extends EventEmitter {
    */
   start(config) {
     if (this.live) throw new Error('Stream already running')
-    const targets = this._buildTargets(config.destinations)
+    this.config = config
+    const targets = this._targets()
     if (targets.length === 0) throw new Error('No valid stream destinations')
 
-    this.config = config
     this.userStopped = false
     this._stability = { lowSince: null }
 
@@ -124,7 +131,7 @@ export class MultistreamEngine extends EventEmitter {
   _spawn() {
     const config = this.config
     const preset = QUALITY_PRESETS[config.quality] || QUALITY_PRESETS['1080p30']
-    const targets = this._buildTargets(config.destinations)
+    const targets = this._targets()
     let teeOutput = targets.map((url) => `[f=flv:onfail=ignore]${url}`).join('|')
     // Optional local recording: a robust Matroska file branch that survives an
     // abrupt stop (unlike MP4, which needs a clean finalize).
@@ -231,6 +238,17 @@ export class MultistreamEngine extends EventEmitter {
     this.live = false
     this.startedAt = null
     return { ok: true }
+  }
+
+  /** Resolve the RTMP target(s) for the current config. Prefers the backend
+   *  single-ingest broadcast (ingestUrl+streamKey); falls back to the legacy
+   *  per-platform keys. */
+  _targets() {
+    const c = this.config || {}
+    if (c.ingestUrl) {
+      return [joinRtmp(c.ingestUrl, c.streamKey)]
+    }
+    return this._buildTargets(c.destinations)
   }
 
   _buildTargets(destinations = []) {

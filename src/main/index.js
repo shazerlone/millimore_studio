@@ -26,16 +26,27 @@ let powerBlockerId = null
 import Store from 'electron-store'
 import { MultistreamEngine, testConnectionSpeed } from './ffmpeg.js'
 import { NativeEngine } from './nativeEngine.js'
+import { BackendClient } from './backend.js'
 import { MT5Manager } from './mt5.js'
 import { OverlayManager } from './overlay.js'
 
 const store = new Store({ name: 'millimore-settings' })
 const keyStore = new Store({ name: 'millimore-keys' })
 
-const engine = new MultistreamEngine() // legacy renderer-fed path (fallback)
-const nativeEngine = new NativeEngine() // Millimore Native Engine (primary)
+const engine = new MultistreamEngine() // renderer-fed encode/stream pipeline
+const nativeEngine = new NativeEngine() // (retained; not the active path)
+const backend = new BackendClient() // live Millimore backend (auth + broadcasts)
 const mt5 = new MT5Manager()
 const overlay = new OverlayManager()
+
+/** Run a backend call and return a serialisable {ok,data|error} for IPC. */
+async function guard(fn) {
+  try {
+    return { ok: true, data: await fn() }
+  } catch (e) {
+    return { ok: false, error: { code: e.code || 'error', message: e.message, status: e.status } }
+  }
+}
 
 let mainWindow = null
 
@@ -468,6 +479,32 @@ ipcMain.on('monitor:command', (_e, cmd) => {
 ipcMain.on('stream:chunk', (_e, buffer) => engine.pushChunk(buffer))
 ipcMain.on('stream:audio', (_e, buffer) => engine.pushAudio(buffer))
 ipcMain.handle('stream:testSpeed', () => testConnectionSpeed())
+
+// ---- IPC: Millimore backend (auth + broadcasts) ------------------------
+
+// Restore a persisted session on launch: valid token → { authed, user }.
+ipcMain.handle('backend:session', async () => {
+  if (!backend.isAuthed) return { authed: false }
+  try {
+    return { authed: true, user: await backend.me() }
+  } catch {
+    return { authed: false }
+  }
+})
+ipcMain.handle('backend:login', (_e, { email, password, twofaCode } = {}) =>
+  guard(() => backend.login(email, password, twofaCode))
+)
+ipcMain.handle('backend:otpRequest', (_e, { phone } = {}) => guard(() => backend.otpRequest(phone)))
+ipcMain.handle('backend:otpVerify', (_e, { requestId, code } = {}) =>
+  guard(() => backend.otpVerify(requestId, code))
+)
+ipcMain.handle('backend:logout', () => {
+  backend.logout()
+  return { ok: true }
+})
+ipcMain.handle('backend:createBroadcast', (_e, { title } = {}) => guard(() => backend.createBroadcast(title)))
+ipcMain.handle('backend:startBroadcast', (_e, { id } = {}) => guard(() => backend.startBroadcast(id)))
+ipcMain.handle('backend:endBroadcast', (_e, { id } = {}) => guard(() => backend.endBroadcast(id)))
 
 // ---- IPC: Millimore Native Engine (primary streaming path) -------------
 

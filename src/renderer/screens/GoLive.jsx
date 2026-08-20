@@ -66,6 +66,7 @@ export function GoLive() {
   const cameraStream = useRef(null)
   const screenStream = useRef(null)
   const compositor = useRef(null)
+  const broadcastId = useRef(null) // active backend broadcast id (for start/end)
   const timerRef = useRef(null)
   const startedAt = useRef(null)
   const tradeHideTimer = useRef(null)
@@ -312,69 +313,65 @@ export function GoLive() {
   }
 
   const goLive = async () => {
-    // Validate keys for enabled non-Millimore destinations.
-    const missing = DESTS.filter(
-      (d) => !d.always && enabled[d.platform] && !(keys[d.platform] || '').trim()
-    )
-    if (missing.length) {
-      pushToast(
-        `Add a stream key for ${missing.map((m) => m.label).join(', ')}, or turn it off.`,
-        'warning'
-      )
-      return
-    }
-
+    if (!bridge) return
     setStarting(true)
-    const dests = DESTS.filter((d) => enabled[d.platform]).map((d) => ({
-      platform: d.platform,
-      key: keys[d.platform] || ''
-    }))
     try {
-      if (bridge) {
-        // Capture happens INSIDE this window (getUserMedia/getDisplayMedia —
-        // permissions work here, which is why the preview shows your camera).
-        // We composite screen + camera PiP + the trade-card/ticker overlay on a
-        // canvas, then hand the finished video to the engine, which only
-        // hardware-encodes it once and tees it to every destination. FFmpeg
-        // never touches the camera, so macOS never blocks it.
-        compositor.current = new StreamCompositor({
-          quality,
-          getOverlay: () => ({
-            config: overlayConfigRef.current,
-            trade: overlayTradeRef.current,
-            scene: sceneRef.current
-          }),
-          onThumbnail: (url) => bridge.monitor.pushPreview(url)
-        })
-        const { mode, audio } = await compositor.current.prepare(cameraStream.current)
-        if (screenSource?.id) await compositor.current.setScreenSource(screenSource.id)
-
-        // Start the engine (FFmpeg: transcode once → tee to all destinations +
-        // optional local recording), then feed it the composited frames.
-        const startRes = await bridge.stream.start({
-          quality,
-          destinations: dests,
-          title,
-          mode,
-          audio,
-          record: recordEnabled
-        })
-        compositor.current.beginRecording()
-        if (startRes?.recordPath) pushToast(`Recording to ${startRes.recordPath}`, 'info', 6000)
+      // Open a backend broadcast: the backend returns ONE rtmps ingest and
+      // simulcasts to connected destinations (YouTube/Meta) + mobile viewers.
+      const bRes = await bridge.backend.createBroadcast(title || 'Live trading')
+      if (!bRes?.ok) {
+        const code = bRes?.error?.code
+        if (code === 'offline') throw new Error("Couldn't reach the Millimore server. Check your connection.")
+        if (code === 'not_available') throw new Error('Live streaming isn’t enabled for your account yet.')
+        if (bRes?.error?.status === 403) throw new Error('Your account isn’t an approved creator yet.')
+        throw new Error(bRes?.error?.message || 'Couldn’t start the broadcast.')
       }
+      const broadcast = bRes.data || {}
+      broadcastId.current = broadcast.id || null
+      if (!broadcast.ingestUrl) throw new Error('The server didn’t return a stream ingest. Please try again.')
+
+      // Compose locally (camera + screen PiP + overlays), then hand the finished
+      // video to the engine, which streams the single backend ingest.
+      compositor.current = new StreamCompositor({
+        quality,
+        getOverlay: () => ({
+          config: overlayConfigRef.current,
+          trade: overlayTradeRef.current,
+          scene: sceneRef.current
+        }),
+        onThumbnail: (url) => bridge.monitor.pushPreview(url)
+      })
+      const { mode, audio } = await compositor.current.prepare(cameraStream.current)
+      if (screenSource?.id) await compositor.current.setScreenSource(screenSource.id)
+
+      const startRes = await bridge.stream.start({
+        quality,
+        ingestUrl: broadcast.ingestUrl,
+        streamKey: broadcast.streamKey || '',
+        mode,
+        audio,
+        record: recordEnabled
+      })
+      compositor.current.beginRecording()
+      if (startRes?.recordPath) pushToast(`Recording to ${startRes.recordPath}`, 'info', 6000)
+
+      // Tell the backend RTMP is flowing → flips the broadcast phase to "live".
+      if (broadcastId.current) await bridge.backend.startBroadcast(broadcastId.current)
+
       setIsLive(true)
       startTimer()
       setCaptureError(null)
-      pushToast(
-        `You're live${dests.length ? ` to ${dests.length} destination${dests.length > 1 ? 's' : ''}` : ''}!`,
-        'success'
-      )
+      pushToast("You're live!", 'success')
     } catch (err) {
       console.error('Failed to go live:', err)
       // Roll back any partial start.
       compositor.current?.stop()
       compositor.current = null
       await bridge?.stream.stop().catch(() => {})
+      if (broadcastId.current) {
+        bridge?.backend.endBroadcast(broadcastId.current).catch(() => {})
+        broadcastId.current = null
+      }
 
       const raw = err?.message || ''
       let msg
@@ -385,8 +382,6 @@ export function GoLive() {
       } else if (/camera/i.test(raw)) {
         setCaptureError('camera')
         msg = 'Couldn’t start your camera. Enable Camera for Millimore in System Settings → Privacy & Security.'
-      } else if (/destination/i.test(raw)) {
-        msg = 'No stream destinations. Add at least one stream key.'
       } else {
         msg = raw || 'Couldn’t go live. Please try again.'
       }
@@ -411,6 +406,10 @@ export function GoLive() {
   const stopStream = async () => {
     cleanupAfterStop()
     await bridge?.stream.stop().catch(() => {})
+    if (broadcastId.current) {
+      bridge?.backend.endBroadcast(broadcastId.current).catch(() => {})
+      broadcastId.current = null
+    }
   }
 
   const activeCount = DESTS.filter((d) => enabled[d.platform]).length

@@ -56,6 +56,18 @@ const api = {
     onStats: (cb) => subscribe('engine:stats', cb)
   },
 
+  // ---- Millimore backend (auth + broadcasts) ----
+  backend: {
+    session: () => ipcRenderer.invoke('backend:session'),
+    login: (email, password, twofaCode) => ipcRenderer.invoke('backend:login', { email, password, twofaCode }),
+    otpRequest: (phone) => ipcRenderer.invoke('backend:otpRequest', { phone }),
+    otpVerify: (requestId, code) => ipcRenderer.invoke('backend:otpVerify', { requestId, code }),
+    logout: () => ipcRenderer.invoke('backend:logout'),
+    createBroadcast: (title) => ipcRenderer.invoke('backend:createBroadcast', { title }),
+    startBroadcast: (id) => ipcRenderer.invoke('backend:startBroadcast', { id }),
+    endBroadcast: (id) => ipcRenderer.invoke('backend:endBroadcast', { id })
+  },
+
   // ---- MT5 connection ----
   mt5: {
     connect: (creds) => ipcRenderer.invoke('mt5:connect', creds),
