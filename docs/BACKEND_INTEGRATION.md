@@ -74,15 +74,19 @@ Store the JWT (Electron `safeStorage`), send `Authorization: Bearer <jwt>`.
 ## 3. Desktop build phases
 
 **Phase 1 — Auth + broadcast (stream through the backend).**
-Add a login screen (email/password + phone OTP). On Go Live:
-`createBroadcast(title)` → stream our engine to `ingestUrl`+`streamKey` →
+Add a login screen with **both** email/password (`POST /auth/login`) **and**
+phone OTP (`POST /auth/otp/request` → `POST /auth/otp/verify`). Persist the JWT
+in Electron `safeStorage`; on launch, `GET /me` to restore the session. On Go
+Live: `createBroadcast(title)` → stream our engine to `ingestUrl`+`streamKey` →
 `startBroadcast(id)`. On Stop: `endBroadcast(id)`. Keep the current capture,
 compositor, overlays exactly as-is — only the RTMP target changes.
 
-**Phase 2 — Connect Meta + YouTube.**
+**Phase 2 — Connect Meta + YouTube (OAuth).**
 - YouTube: call `POST /youtube/connect` → open `url` in the system browser → done.
-- Meta: see §4 (needs one backend endpoint) — until then, a "Facebook stream
-  key" field that calls `POST /broadcasts/{id}/outputs { platform:"facebook", streamKey, url }`.
+- Meta: **OAuth only** (product decision) → **blocked on backend R1**. The
+  desktop shows a "Connect Meta" button that calls `POST /facebook/connect`
+  (opens consent), then `POST /broadcasts/{id}/destinations/facebook/connect`.
+  The manual-stream-key path is NOT used.
 
 **Phase 3 — Place trades → backend → overlay + copy.**
 Wire "Place a trade" to `POST /broadcasts/{id}/orders` (see §4). The backend
@@ -100,8 +104,9 @@ live on the desktop, fed by the `broadcast:<id>` channel.
 
 Everything in §2 exists. These do **not** yet and block Phases 2–3.
 
-### R1 — Meta (Facebook/Instagram) connect, OAuth (parallel to YouTube)
-So a creator "connects their Meta account" instead of pasting a stream key.
+### R1 — Meta (Facebook/Instagram) connect, OAuth (parallel to YouTube) — REQUIRED
+Product decision: Meta ships via OAuth only (no manual stream key). This blocks
+the desktop's "Connect Meta" button.
 ```
 POST /facebook/connect            → { url }         # FB OAuth consent URL
 GET  /facebook/status             → { connected, pageName?, igUsername? }
@@ -113,8 +118,8 @@ POST /broadcasts/{id}/destinations/facebook/connect
 ```
 Env: `FACEBOOK_APP_ID`, `FACEBOOK_APP_SECRET` (already listed in contract §7).
 Scopes: Live Video API (`publish_video`, `pages_manage_posts`, IG equivalents).
-Interim (no backend change): desktop uses `POST /broadcasts/{id}/outputs` with a
-manually pasted Facebook persistent stream key — works today.
+Note: needs a Facebook app with Live Video permissions (App Review) — start that
+approval early, it gates Meta go-live.
 
 ### R2 — Live orders (on-stream trade placement → MT bridge → WS + copiers)
 Currently the Flutter app's `placeLiveOrder` is a local demo (no API call).
@@ -146,9 +151,15 @@ desktop shows the right "apply to become a creator" state).
 
 ---
 
-## 5. Open decisions for the product owner
-1. **Meta connect:** OAuth now (R1, richer, needs FB app review) vs. paste
-   Facebook stream key now (ships immediately, upgrade to OAuth later)?
-2. **Keep the old "paste YouTube key" flow** as a fallback, or fully switch to
-   the backend broadcast flow?
-3. **Desktop login:** email/password, phone OTP, or both? (backend supports both)
+## 5. Decisions (locked)
+1. **Meta connect:** OAuth only (backend R1). No manual stream-key path.
+2. **Desktop login:** both email/password AND phone OTP.
+3. **Streaming:** fully switch to the backend single-ingest broadcast flow; the
+   old "paste YouTube key + local tee" path is retired for the creator flow.
+
+## 6. Blocking order
+- Backend delivers **R1** (Meta OAuth) and **R2** (live orders) — the two
+  gaps — plus confirms **R3/R4**.
+- Desktop builds Phase 1 (auth + broadcast) against existing endpoints in
+  parallel; Phase 2 Meta lands when R1 is ready; Phase 3 trades land when R2 is
+  ready.
