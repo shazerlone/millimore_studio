@@ -67,8 +67,9 @@ jobs:
         run: npm run build
       - name: Package (.dmg + .zip)
         # Signs + notarizes when the Apple secrets are configured; otherwise
-        # produces an unsigned build so CI still succeeds. electron-builder
-        # re-signs the nested (plist-edited) OBS.app under the same identity.
+        # produces an ad-hoc-signed build (mac.identity=null skips electron-
+        # builder's signing so the afterPack ad-hoc sign is the only one), so CI
+        # still succeeds without Apple certs.
         shell: bash
         run: |
           ARGS="--mac --${{ matrix.arch }} --publish never"
